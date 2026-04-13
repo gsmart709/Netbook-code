@@ -49,11 +49,36 @@ def carve_cell(grid, x, y, char=" "):
     grid[y][x] = char
 
 
+def is_open_cell(grid, x, y):
+    return grid[y][x] != "#"
+
+
+def can_carve_vertical_door(grid, x, y):
+    """
+    A door in a vertical wall is only valid if it connects open space
+    on both left and right sides.
+    """
+    if x - 1 < 0 or x + 1 >= len(grid[0]):
+        return False
+    return is_open_cell(grid, x - 1, y) and is_open_cell(grid, x + 1, y)
+
+
+def can_carve_horizontal_door(grid, x, y):
+    """
+    A door in a horizontal wall is only valid if it connects open space
+    above and below.
+    """
+    if y - 1 < 0 or y + 1 >= len(grid):
+        return False
+    return is_open_cell(grid, x, y - 1) and is_open_cell(grid, x, y + 1)
+
+
 def carve_door_between(grid, room_a, room_b):
     """
-    Carve exactly one door in the shared wall between two adjacent rectangular rooms.
+    Carve exactly one door in the shared wall between two adjacent rooms.
+    Only carve if the door would connect real open space on both sides.
     """
-    # vertical adjacency: room_a left of room_b or vice versa
+    # room_a left of room_b (or vice versa)
     if room_a["x2"] + 2 == room_b["x1"] or room_b["x2"] + 2 == room_a["x1"]:
         left = room_a if room_a["x2"] < room_b["x1"] else room_b
         right = room_b if left is room_a else room_a
@@ -61,19 +86,33 @@ def carve_door_between(grid, room_a, room_b):
         wall_x = left["x2"] + 1
         y1 = max(left["y1"], right["y1"])
         y2 = min(left["y2"], right["y2"])
-        door_y = (y1 + y2) // 2
-        carve_cell(grid, wall_x, door_y)
 
-    # horizontal adjacency: room_a above room_b or vice versa
-    elif room_a["y2"] + 2 == room_b["y1"] or room_b["y2"] + 2 == room_a["y1"]:
+        candidates = [y for y in range(y1, y2 + 1) if can_carve_vertical_door(grid, wall_x, y)]
+        if not candidates:
+            return False
+
+        door_y = candidates[len(candidates) // 2]
+        carve_cell(grid, wall_x, door_y)
+        return True
+
+    # room_a above room_b (or vice versa)
+    if room_a["y2"] + 2 == room_b["y1"] or room_b["y2"] + 2 == room_a["y1"]:
         top = room_a if room_a["y2"] < room_b["y1"] else room_b
         bottom = room_b if top is room_a else room_a
 
         wall_y = top["y2"] + 1
         x1 = max(top["x1"], bottom["x1"])
         x2 = min(top["x2"], bottom["x2"])
-        door_x = (x1 + x2) // 2
+
+        candidates = [x for x in range(x1, x2 + 1) if can_carve_horizontal_door(grid, x, wall_y)]
+        if not candidates:
+            return False
+
+        door_x = candidates[len(candidates) // 2]
         carve_cell(grid, door_x, wall_y)
+        return True
+
+    return False
 
 
 def carve_vertical_corridor(grid, x, y1, y2):
@@ -126,23 +165,17 @@ def draw_path(grid, path):
 
 def build_7_room_layout(width, height):
     """
-    Robust carve-from-walls layout:
-    Rooms:
-      Kitchen, Dining, Common, Bedroom, Bath, Bedroom, Bottom-right room
-    Bottom-right room becomes Porch if front door enters it,
-    otherwise Bedroom/Garage.
+    Stable carved layout.
     """
     grid = create_wall_grid(width, height)
 
     kitchen_side = random.choice(["left", "right"])
     front_mode = random.choice(["common", "small_room"])
 
-    # Room sizes
     top_h = 5
     left_w = 5
     right_w = 5
 
-    # central common area
     common_x1 = 7
     common_x2 = width - 8
     common_y1 = 7
@@ -151,7 +184,6 @@ def build_7_room_layout(width, height):
     if common_x2 - common_x1 + 1 < 7:
         return None, "common too narrow"
 
-    # Top band
     kitchen_w = random.choice([5, 7])
 
     if kitchen_side == "left":
@@ -164,20 +196,14 @@ def build_7_room_layout(width, height):
     if room_area(kitchen) < 25:
         return None, "kitchen too small"
 
-    if dining["x2"] - dining["x1"] + 1 < 7:
-        return None, "dining too small"
-
-    # Left side stack
     left_bed = {"type": "Bedroom", "x1": 1, "x2": left_w, "y1": 7, "y2": 11}
     bath = {"type": "Bath", "x1": 1, "x2": left_w, "y1": 13, "y2": 15}
 
-    # Right side stack
     right_top = {"type": "Bedroom", "x1": width - right_w - 1, "x2": width - 2, "y1": 7, "y2": 11}
     right_bottom = {"type": "Bedroom", "x1": width - right_w - 1, "x2": width - 2, "y1": 13, "y2": height - 2}
 
     common = {"type": "Common", "x1": common_x1, "x2": common_x2, "y1": common_y1, "y2": common_y2}
 
-    # Optional front porch: small room under common
     porch = None
     if front_mode == "small_room":
         porch_w = 5
@@ -187,13 +213,10 @@ def build_7_room_layout(width, height):
         porch_y2 = height - 2
         porch = {"type": "Porch", "x1": porch_x1, "x2": porch_x2, "y1": porch_y1, "y2": porch_y2}
 
-        # Pull common up slightly so porch is distinct
         common["y2"] = porch_y1 - 2
-
         if common["y2"] - common["y1"] + 1 < 5:
             return None, "common too short with porch"
 
-    # Carve rooms
     rooms = [kitchen, dining, common, left_bed, bath, right_top, right_bottom]
     if porch is not None:
         rooms.append(porch)
@@ -201,44 +224,50 @@ def build_7_room_layout(width, height):
     for room in rooms:
         carve_room(grid, room)
 
-    # Interior doors
-    carve_door_between(grid, kitchen, dining)
+    # Kitchen <-> Dining
+    if not carve_door_between(grid, kitchen, dining):
+        return None, "failed kitchen-dining door"
 
-    # Dining connects downward into common by corridor
-    dining_cx, dining_cy = room_center(dining)
-    common_cx, common_cy = room_center(common)
-    carve_vertical_corridor(grid, dining_cx, dining["y2"] + 1, common["y1"] - 1)
-    carve_horizontal_corridor(grid, min(dining_cx, common_cx), max(dining_cx, common_cx), common["y1"] - 1)
-    carve_cell(grid, common_cx, common["y1"] - 1)
+    # Dining down to Common via corridor
+    dining_cx, _ = room_center(dining)
+    common_cx, _ = room_center(common)
+    corridor_y = common["y1"] - 1
+    carve_vertical_corridor(grid, dining_cx, dining["y2"] + 1, corridor_y)
+    carve_horizontal_corridor(grid, min(dining_cx, common_cx), max(dining_cx, common_cx), corridor_y)
+    carve_cell(grid, common_cx, corridor_y)
 
-    # Left bedroom and bath connect only via one door each to common/bedroom chain
-    carve_door_between(grid, left_bed, common)
-    carve_door_between(grid, left_bed, bath)
+    # Left bed <-> Common
+    if not carve_door_between(grid, left_bed, common):
+        return None, "failed left bed-common door"
 
-    # Right top bedroom connects to common
-    carve_door_between(grid, right_top, common)
+    # Left bed <-> Bath
+    if not carve_door_between(grid, left_bed, bath):
+        return None, "failed left bed-bath door"
 
-    # Bottom-right room:
+    # Right top <-> Common
+    if not carve_door_between(grid, right_top, common):
+        return None, "failed right top-common door"
+
+    # Right bottom
     if porch is not None:
-        # right bottom room connects to common
-        carve_door_between(grid, right_bottom, common)
-        # porch connects to common
-        carve_door_between(grid, porch, common)
+        if not carve_door_between(grid, right_bottom, common):
+            return None, "failed right bottom-common door"
+        if not carve_door_between(grid, porch, common):
+            return None, "failed porch-common door"
     else:
-        carve_door_between(grid, right_bottom, common)
+        if not carve_door_between(grid, right_bottom, common):
+            return None, "failed right bottom-common door"
 
-    # Exterior B door always into kitchen
+    # Exterior doors
     kitchen_cx, _ = room_center(kitchen)
     carve_cell(grid, kitchen_cx, 0, "B")
     start = (kitchen_cx, 1)
 
-    # Exterior F door
     if porch is not None:
         porch_cx, _ = room_center(porch)
         carve_cell(grid, porch_cx, height - 1, "F")
         end = (porch_cx, height - 2)
     else:
-        # enter common directly, offset if possible and not aligned with B
         common_center_x = (common["x1"] + common["x2"]) // 2
         candidates = [common_center_x, common_center_x - 2, common_center_x + 2]
         candidates = [x for x in candidates if common["x1"] <= x <= common["x2"] and x != kitchen_cx]
@@ -335,14 +364,24 @@ def plot_house(grid, rooms, labels, width, height):
         for x in range(width):
             if grid[y][x] == "B":
                 ax.text(
-                    x + 0.5, height - y - 0.5, "B",
-                    ha="center", va="center", fontsize=14, fontweight="bold",
+                    x + 0.5,
+                    height - y - 0.5,
+                    "B",
+                    ha="center",
+                    va="center",
+                    fontsize=14,
+                    fontweight="bold",
                     bbox=dict(boxstyle="circle,pad=0.25", fc="white", ec="black"),
                 )
             elif grid[y][x] == "F":
                 ax.text(
-                    x + 0.5, height - y - 0.5, "F",
-                    ha="center", va="center", fontsize=14, fontweight="bold",
+                    x + 0.5,
+                    height - y - 0.5,
+                    "F",
+                    ha="center",
+                    va="center",
+                    fontsize=14,
+                    fontweight="bold",
                     bbox=dict(boxstyle="circle,pad=0.25", fc="white", ec="black"),
                 )
 
@@ -350,8 +389,13 @@ def plot_house(grid, rooms, labels, width, height):
         label = labels[i]
         cx, cy = room_center(room)
         ax.text(
-            cx + 0.5, height - cy - 0.5, label,
-            ha="center", va="center", fontsize=10, fontweight="bold",
+            cx + 0.5,
+            height - cy - 0.5,
+            label,
+            ha="center",
+            va="center",
+            fontsize=10,
+            fontweight="bold",
             bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="black", alpha=0.85),
         )
 
