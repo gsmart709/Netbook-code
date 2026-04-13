@@ -2,15 +2,31 @@ import random
 from collections import deque
 import matplotlib.pyplot as plt
 
-WIDTH = 21
-HEIGHT = 15
+WIDTH = 21   # keep odd
+HEIGHT = 15  # keep odd
 
 
 def create_empty_grid():
     return [[" " for _ in range(WIDTH)] for _ in range(HEIGHT)]
 
 
-def add_outer_walls(grid):
+def print_grid(grid):
+    for row in grid:
+        print("".join(row))
+
+
+def segment_center(start, end):
+    """
+    Returns the center cell of an inclusive segment.
+    Assumes odd length.
+    """
+    length = end - start + 1
+    if length % 2 == 0:
+        raise ValueError(f"Segment {start}..{end} has even length; cannot center exactly.")
+    return (start + end) // 2
+
+
+def draw_outer_walls(grid):
     for x in range(WIDTH):
         grid[0][x] = "#"
         grid[HEIGHT - 1][x] = "#"
@@ -19,88 +35,31 @@ def add_outer_walls(grid):
         grid[y][WIDTH - 1] = "#"
 
 
-def add_wall_with_door(grid, x1, y1, x2, y2):
+def draw_vertical_wall(grid, x, y1, y2, door_y=None):
+    for y in range(y1, y2 + 1):
+        if y != door_y:
+            grid[y][x] = "#"
+
+
+def draw_horizontal_wall(grid, x1, x2, y, door_x=None):
+    for x in range(x1, x2 + 1):
+        if x != door_x:
+            grid[y][x] = "#"
+
+
+def place_front_back(grid, top_span, bottom_span):
     """
-    Draw a straight wall between two points, leaving one door opening.
-    Supports only vertical or horizontal walls.
+    B always on top wall, F always on bottom wall.
+    Each is centered on its wall segment.
+    top_span / bottom_span are (x_start, x_end) inclusive interior spans.
     """
-    if x1 == x2:
-        ys = sorted([y1, y2])
-        possible = [y for y in range(ys[0] + 1, ys[1]) if 0 < y < HEIGHT - 1]
-        if not possible:
-            return
-        door_y = random.choice(possible)
-        for y in range(ys[0], ys[1] + 1):
-            if y != door_y:
-                grid[y][x1] = "#"
+    top_x = segment_center(top_span[0], top_span[1])
+    bottom_x = segment_center(bottom_span[0], bottom_span[1])
 
-    elif y1 == y2:
-        xs = sorted([x1, x2])
-        possible = [x for x in range(xs[0] + 1, xs[1]) if 0 < x < WIDTH - 1]
-        if not possible:
-            return
-        door_x = random.choice(possible)
-        for x in range(xs[0], xs[1] + 1):
-            if x != door_x:
-                grid[y1][x] = "#"
+    grid[0][top_x] = "B"
+    grid[HEIGHT - 1][bottom_x] = "F"
 
-
-def add_room_walls(grid):
-    """
-    Create a house layout using only straight interior walls.
-    """
-    # Main vertical split
-    main_v = random.choice([7, 8, 9, 10, 11, 12, 13])
-    add_wall_with_door(grid, main_v, 1, main_v, HEIGHT - 2)
-
-    # Left side horizontal split
-    left_h = random.choice([4, 5, 6, 7, 8, 9, 10])
-    add_wall_with_door(grid, 1, left_h, main_v, left_h)
-
-    # Right side horizontal split
-    right_h = random.choice([4, 5, 6, 7, 8, 9, 10])
-    add_wall_with_door(grid, main_v, right_h, WIDTH - 2, right_h)
-
-    # Optional extra room split on left
-    if random.random() < 0.7:
-        extra_v_left = random.choice([3, 4, 5, 6])
-        top_or_bottom = random.choice(["top", "bottom"])
-        if top_or_bottom == "top":
-            add_wall_with_door(grid, extra_v_left, 1, extra_v_left, left_h)
-        else:
-            add_wall_with_door(grid, extra_v_left, left_h, extra_v_left, HEIGHT - 2)
-
-    # Optional extra room split on right
-    if random.random() < 0.7:
-        extra_v_right = random.choice([main_v + 2, main_v + 3, main_v + 4, main_v + 5])
-        extra_v_right = min(extra_v_right, WIDTH - 3)
-        top_or_bottom = random.choice(["top", "bottom"])
-        if top_or_bottom == "top":
-            add_wall_with_door(grid, extra_v_right, 1, extra_v_right, right_h)
-        else:
-            add_wall_with_door(grid, extra_v_right, right_h, extra_v_right, HEIGHT - 2)
-
-
-def get_empty_cells(grid):
-    cells = []
-    for y in range(1, HEIGHT - 1):
-        for x in range(1, WIDTH - 1):
-            if grid[y][x] == " ":
-                cells.append((x, y))
-    return cells
-
-
-def place_points(grid):
-    empties = get_empty_cells(grid)
-    while True:
-        start = random.choice(empties)
-        end = random.choice(empties)
-        if start != end:
-            sx, sy = start
-            ex, ey = end
-            grid[sy][sx] = "E"
-            grid[ey][ex] = "F"
-            return start, end
+    return (top_x, 1), (bottom_x, HEIGHT - 2)  # pathfinding starts just inside
 
 
 def find_path(grid, start, end):
@@ -141,30 +100,25 @@ def draw_path(grid, path):
             grid[y][x] = "."
 
 
-def print_grid(grid):
-    for row in grid:
-        print("".join(row))
-
-
 def plot_house(grid):
     fig, ax = plt.subplots(figsize=(8, 6))
     ax.set_facecolor("white")
 
-    # Draw floor cells
+    # draw floor cells
     for y in range(HEIGHT):
         for x in range(WIDTH):
             if grid[y][x] != "#":
                 rect = plt.Rectangle((x, HEIGHT - y - 1), 1, 1, fill=False, linewidth=0.5)
                 ax.add_patch(rect)
 
-    # Draw walls as filled black squares
+    # draw walls
     for y in range(HEIGHT):
         for x in range(WIDTH):
             if grid[y][x] == "#":
                 rect = plt.Rectangle((x, HEIGHT - y - 1), 1, 1)
                 ax.add_patch(rect)
 
-    # Draw path
+    # draw path
     for y in range(HEIGHT):
         for x in range(WIDTH):
             if grid[y][x] == ".":
@@ -172,14 +126,14 @@ def plot_house(grid):
                 cy = HEIGHT - y - 0.5
                 ax.plot(cx, cy, marker="o", markersize=4)
 
-    # Draw E and F labels
+    # draw B and F labels
     for y in range(HEIGHT):
         for x in range(WIDTH):
-            if grid[y][x] == "E":
+            if grid[y][x] == "B":
                 ax.text(
                     x + 0.5,
                     HEIGHT - y - 0.5,
-                    "E",
+                    "B",
                     ha="center",
                     va="center",
                     fontsize=14,
@@ -207,20 +161,142 @@ def plot_house(grid):
     plt.show()
 
 
-def generate_valid_house():
-    while True:
-        grid = create_empty_grid()
-        add_outer_walls(grid)
-        add_room_walls(grid)
-        start, end = place_points(grid)
-        path = find_path(grid, start, end)
+def build_two_room_vertical():
+    """
+    2 rooms split left/right.
+    """
+    grid = create_empty_grid()
+    draw_outer_walls(grid)
 
+    # even x makes left and right spans odd widths
+    split_x = random.choice([6, 10, 14])
+
+    door_y = segment_center(1, HEIGHT - 2)
+    draw_vertical_wall(grid, split_x, 1, HEIGHT - 2, door_y=door_y)
+
+    # choose top/bottom exterior room spans for B and F
+    spans = [(1, split_x - 1), (split_x + 1, WIDTH - 2)]
+    top_span = random.choice(spans)
+    bottom_span = random.choice(spans)
+
+    start, end = place_front_back(grid, top_span, bottom_span)
+    return grid, start, end, 2
+
+
+def build_two_room_horizontal():
+    """
+    2 rooms split top/bottom.
+    """
+    grid = create_empty_grid()
+    draw_outer_walls(grid)
+
+    split_y = random.choice([4, 8, 10])
+
+    door_x = segment_center(1, WIDTH - 2)
+    draw_horizontal_wall(grid, 1, WIDTH - 2, split_y, door_x=door_x)
+
+    # full top and bottom spans stay odd width
+    top_span = (1, WIDTH - 2)
+    bottom_span = (1, WIDTH - 2)
+
+    start, end = place_front_back(grid, top_span, bottom_span)
+    return grid, start, end, 2
+
+
+def build_three_room():
+    """
+    3 rooms:
+    full vertical split, then one horizontal split on either left or right side.
+    Every room gets at least one centered door.
+    """
+    grid = create_empty_grid()
+    draw_outer_walls(grid)
+
+    split_x = random.choice([6, 10, 14])
+    main_door_y = segment_center(1, HEIGHT - 2)
+    draw_vertical_wall(grid, split_x, 1, HEIGHT - 2, door_y=main_door_y)
+
+    side = random.choice(["left", "right"])
+    split_y = random.choice([4, 8, 10])  # even so top/bottom room heights are odd
+
+    if side == "left":
+        door_x = segment_center(1, split_x - 1)
+        draw_horizontal_wall(grid, 1, split_x - 1, split_y, door_x=door_x)
+
+        top_spans = [(1, split_x - 1), (split_x + 1, WIDTH - 2)]
+        bottom_spans = [(1, split_x - 1), (split_x + 1, WIDTH - 2)]
+    else:
+        door_x = segment_center(split_x + 1, WIDTH - 2)
+        draw_horizontal_wall(grid, split_x + 1, WIDTH - 2, split_y, door_x=door_x)
+
+        top_spans = [(1, split_x - 1), (split_x + 1, WIDTH - 2)]
+        bottom_spans = [(1, split_x - 1), (split_x + 1, WIDTH - 2)]
+
+    top_span = random.choice(top_spans)
+    bottom_span = random.choice(bottom_spans)
+
+    start, end = place_front_back(grid, top_span, bottom_span)
+    return grid, start, end, 3
+
+
+def build_four_room():
+    """
+    4 rooms:
+    one full vertical wall + one full horizontal wall.
+    Each wall segment gets a centered door so all rooms are accessible.
+    """
+    grid = create_empty_grid()
+    draw_outer_walls(grid)
+
+    split_x = random.choice([6, 10, 14])
+    split_y = random.choice([4, 8, 10])
+
+    # centered doors in each segment
+    top_v_door = segment_center(1, split_y - 1)
+    bottom_v_door = segment_center(split_y + 1, HEIGHT - 2)
+
+    left_h_door = segment_center(1, split_x - 1)
+    right_h_door = segment_center(split_x + 1, WIDTH - 2)
+
+    # draw vertical wall in two segments
+    draw_vertical_wall(grid, split_x, 1, split_y - 1, door_y=top_v_door)
+    grid[split_y][split_x] = "#"  # center crossing cell
+    draw_vertical_wall(grid, split_x, split_y + 1, HEIGHT - 2, door_y=bottom_v_door)
+
+    # draw horizontal wall in two segments
+    draw_horizontal_wall(grid, 1, split_x - 1, split_y, door_x=left_h_door)
+    draw_horizontal_wall(grid, split_x + 1, WIDTH - 2, split_y, door_x=right_h_door)
+
+    top_spans = [(1, split_x - 1), (split_x + 1, WIDTH - 2)]
+    bottom_spans = [(1, split_x - 1), (split_x + 1, WIDTH - 2)]
+
+    top_span = random.choice(top_spans)
+    bottom_span = random.choice(bottom_spans)
+
+    start, end = place_front_back(grid, top_span, bottom_span)
+    return grid, start, end, 4
+
+
+def generate_valid_house():
+    builders = [
+        build_two_room_vertical,
+        build_two_room_horizontal,
+        build_three_room,
+        build_four_room,
+    ]
+
+    while True:
+        builder = random.choice(builders)
+        grid, start, end, room_count = builder()
+
+        path = find_path(grid, start, end)
         if path:
             draw_path(grid, path)
-            return grid
+            return grid, room_count
 
 
 if __name__ == "__main__":
-    house = generate_valid_house()
+    house, rooms = generate_valid_house()
+    print(f"Rooms: {rooms}")
     print_grid(house)
     plot_house(house)
