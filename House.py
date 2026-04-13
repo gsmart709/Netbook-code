@@ -1,5 +1,6 @@
 import random
 from collections import deque
+import matplotlib.pyplot as plt
 
 WIDTH = 15
 HEIGHT = 9
@@ -65,6 +66,23 @@ def print_grid(grid):
     for row in grid:
         print("".join(row))
 
+# 🔥 NEW: visualization
+def plot_grid(grid):
+    color_map = {
+        "#": 0,  # wall
+        " ": 1,  # empty
+        "E": 2,
+        "F": 3,
+        ".": 4
+    }
+
+    numeric_grid = [[color_map[cell] for cell in row] for row in grid]
+
+    plt.imshow(numeric_grid)
+    plt.title("Generated House")
+    plt.axis("off")
+    plt.show()
+
 def generate_valid_house():
     while True:
         grid = create_empty_grid()
@@ -80,3 +98,4 @@ def generate_valid_house():
 if __name__ == "__main__":
     house = generate_valid_house()
     print_grid(house)
+    plot_grid(house)
