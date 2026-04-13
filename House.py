@@ -28,9 +28,6 @@ def segment_center(start, end):
 
 
 def offset_position(start, end, mode):
-    """
-    For an odd-length segment, return center / offset-left / offset-right.
-    """
     c = segment_center(start, end)
     if mode == "center":
         return c
@@ -82,36 +79,29 @@ def room_area(room):
 
 
 def place_exterior_doors(grid, width, height, kitchen_room, common_room):
-    """
-    B is always on the back (top) and kitchen is always back-left or back-right.
-    F is always on the front (bottom) and can be center / offset left / offset right.
-    B must never line up exactly with F.
-    """
-    # Back door in kitchen: centered on kitchen segment
     bx = segment_center(kitchen_room["x1"], kitchen_room["x2"])
 
-    # Front door in common: center or offset
     modes = ["center", "left", "right"]
     random.shuffle(modes)
 
     fx = None
+    chosen_mode = None
     for mode in modes:
         candidate = offset_position(common_room["x1"], common_room["x2"], mode)
         if candidate != bx:
             fx = candidate
+            chosen_mode = mode
             break
 
     if fx is None:
-        # fallback: any x in common room not equal to bx
         possible = [x for x in range(common_room["x1"], common_room["x2"] + 1) if x != bx]
         fx = random.choice(possible)
+        chosen_mode = "fallback"
 
     grid[0][bx] = "B"
     grid[height - 1][fx] = "F"
 
-    start = (bx, 1)
-    end = (fx, height - 2)
-    return start, end
+    return (bx, 1), (fx, height - 2), chosen_mode
 
 
 def find_path(grid, start, end, width, height):
@@ -161,7 +151,6 @@ def assign_labels(rooms):
     labels[common_index] = "Common"
 
     remaining = [i for i in range(len(rooms)) if i not in labels]
-
     if remaining:
         smallest = min(remaining, key=lambda i: room_area(rooms[i]))
     else:
@@ -176,157 +165,57 @@ def assign_labels(rooms):
     return labels
 
 
-def build_four_room(width, height):
+def build_four_room_template_a(width, height, kitchen_side):
     """
-    More random 4-room layout:
-    - Kitchen always at back-left or back-right
-    - Common always front-ish and biggest
-    - Bedroom and Bath connect only to Common
-    - Bath always compact/small
+    4 rooms:
+    Kitchen at back left/right
+    Common large middle/front
+    Bedroom side
+    Bath compact corner
     """
     grid = create_empty_grid(width, height)
     draw_outer_walls(grid, width, height)
 
-    side = random.choice(["left", "right"])
-
-    # Back band height
     kitchen_h = 3
     split_y = kitchen_h + 1
     lower_y1 = split_y + 1
     lower_y2 = height - 2
 
-    # Compact bath: 3x3 or 5x3-ish footprint
-    bath_w = random.choice([3, 5])
+    kitchen_w = random.choice([5, 7])
+    bedroom_w = random.choice([5, 7])
+    bath_w = 3
     bath_h = 3
 
-    # Kitchen fixed side at back
-    kitchen_w = random.choice([5, 7])
-
-    if side == "left":
+    if kitchen_side == "left":
         kitchen = {"type": "Kitchen", "x1": 1, "x2": kitchen_w, "y1": 1, "y2": kitchen_h}
-        back_other = {"x1": kitchen_w + 2, "x2": width - 2, "y1": 1, "y2": kitchen_h}
-        kitchen_common_door_x = segment_center(back_other["x1"], back_other["x2"])
+        upper_other_x1 = kitchen_w + 2
+        upper_other_x2 = width - 2
+        top_divider_x = kitchen["x2"] + 1
     else:
         kitchen = {"type": "Kitchen", "x1": width - 1 - kitchen_w, "x2": width - 2, "y1": 1, "y2": kitchen_h}
-        back_other = {"x1": 1, "x2": kitchen["x1"] - 2, "y1": 1, "y2": kitchen_h}
-        kitchen_common_door_x = segment_center(back_other["x1"], back_other["x2"])
+        upper_other_x1 = 1
+        upper_other_x2 = kitchen["x1"] - 2
+        top_divider_x = kitchen["x1"] - 1
 
-    # Horizontal wall separating back band from rest
+    if upper_other_x2 - upper_other_x1 + 1 < 7:
+        return None, "top span too small"
+
+    kitchen_common_door_x = segment_center(upper_other_x1, upper_other_x2)
     draw_horizontal_wall(grid, 1, width - 2, split_y, door_x=kitchen_common_door_x)
+    draw_vertical_wall(grid, top_divider_x, 1, kitchen_h, door_y=segment_center(1, kitchen_h))
 
-    # Vertical divider in back band between kitchen and upper-back part
-    back_divider_x = kitchen["x2"] + 1 if side == "left" else kitchen["x1"] - 1
-    back_door_y = segment_center(1, kitchen_h)
-    draw_vertical_wall(grid, back_divider_x, 1, kitchen_h, door_y=back_door_y)
-
-    # Lower region split into bedroom/common/bath
     bath_top = lower_y2 - bath_h + 1
 
-    if side == "left":
-        # Bath on far right, compact
-        bath = {"type": "Bath", "x1": width - 2 - bath_w + 1, "x2": width - 2, "y1": bath_top, "y2": lower_y2}
-        bath_wall_x = bath["x1"] - 1
-
-        # Bedroom on far left lower
-        bedroom_w = random.choice([5, 7])
+    if kitchen_side == "left":
         bedroom = {"type": "Bedroom", "x1": 1, "x2": bedroom_w, "y1": lower_y1, "y2": lower_y2}
-        bed_wall_x = bedroom["x2"] + 1
-
-        common = {
-            "type": "Common",
-            "x1": bed_wall_x + 1,
-            "x2": bath_wall_x - 1,
-            "y1": lower_y1,
-            "y2": lower_y2,
-        }
-
-        if common["x2"] - common["x1"] + 1 < 7:
-            return None
-
-        bed_door_y = segment_center(lower_y1, lower_y2)
-        draw_vertical_wall(grid, bed_wall_x, lower_y1, lower_y2, door_y=bed_door_y)
-
-        bath_door_x = segment_center(bath["x1"], bath["x2"])
-        draw_horizontal_wall(grid, bath["x1"], bath["x2"], bath["y1"] - 1, door_x=bath_door_x)
-        draw_vertical_wall(grid, bath_wall_x, lower_y1, bath["y1"] - 2, door_y=None)
-
+        bath = {"type": "Bath", "x1": width - bath_w - 1, "x2": width - 2, "y1": bath_top, "y2": lower_y2}
+        left_wall_x = bedroom["x2"] + 1
+        right_wall_x = bath["x1"] - 1
     else:
-        # Bath on far left, compact
         bath = {"type": "Bath", "x1": 1, "x2": bath_w, "y1": bath_top, "y2": lower_y2}
-        bath_wall_x = bath["x2"] + 1
-
-        # Bedroom on far right lower
-        bedroom_w = random.choice([5, 7])
-        bedroom = {"type": "Bedroom", "x1": width - 2 - bedroom_w + 1, "x2": width - 2, "y1": lower_y1, "y2": lower_y2}
-        bed_wall_x = bedroom["x1"] - 1
-
-        common = {
-            "type": "Common",
-            "x1": bath_wall_x + 1,
-            "x2": bed_wall_x - 1,
-            "y1": lower_y1,
-            "y2": lower_y2,
-        }
-
-        if common["x2"] - common["x1"] + 1 < 7:
-            return None
-
-        bed_door_y = segment_center(lower_y1, lower_y2)
-        draw_vertical_wall(grid, bed_wall_x, lower_y1, lower_y2, door_y=bed_door_y)
-
-        bath_door_x = segment_center(bath["x1"], bath["x2"])
-        draw_horizontal_wall(grid, bath["x1"], bath["x2"], bath["y1"] - 1, door_x=bath_door_x)
-        draw_vertical_wall(grid, bath_wall_x, lower_y1, bath["y1"] - 2, door_y=None)
-
-    rooms = [kitchen, bedroom, common, bath]
-
-    start, end = place_exterior_doors(grid, width, height, kitchen, common)
-    return grid, rooms, start, end
-
-
-def build_five_room(width, height):
-    """
-    More random 5-room layout:
-    - Kitchen back-left or back-right
-    - Common front-middle and biggest
-    - 2 bedrooms
-    - 1 compact bath
-    - Bedrooms/Bath each one door only to Common
-    """
-    grid = create_empty_grid(width, height)
-    draw_outer_walls(grid, width, height)
-
-    side = random.choice(["left", "right"])
-
-    kitchen_h = 3
-    split_y = kitchen_h + 1
-    lower_y1 = split_y + 1
-    lower_y2 = height - 2
-
-    kitchen_w = random.choice([5, 7])
-
-    if side == "left":
-        kitchen = {"type": "Kitchen", "x1": 1, "x2": kitchen_w, "y1": 1, "y2": kitchen_h}
-        back_other = {"x1": kitchen_w + 2, "x2": width - 2, "y1": 1, "y2": kitchen_h}
-        kitchen_common_door_x = segment_center(back_other["x1"], back_other["x2"])
-    else:
-        kitchen = {"type": "Kitchen", "x1": width - 1 - kitchen_w, "x2": width - 2, "y1": 1, "y2": kitchen_h}
-        back_other = {"x1": 1, "x2": kitchen["x1"] - 2, "y1": 1, "y2": kitchen_h}
-        kitchen_common_door_x = segment_center(back_other["x1"], back_other["x2"])
-
-    draw_horizontal_wall(grid, 1, width - 2, split_y, door_x=kitchen_common_door_x)
-
-    back_divider_x = kitchen["x2"] + 1 if side == "left" else kitchen["x1"] - 1
-    back_door_y = segment_center(1, kitchen_h)
-    draw_vertical_wall(grid, back_divider_x, 1, kitchen_h, door_y=back_door_y)
-
-    # Lower area columns: left room / common / right room
-    side_room_w = 5
-    left_wall_x = side_room_w + 1
-    right_wall_x = width - 2 - side_room_w
-
-    if right_wall_x - left_wall_x - 1 < 7:
-        return None
+        bedroom = {"type": "Bedroom", "x1": width - bedroom_w - 1, "x2": width - 2, "y1": lower_y1, "y2": lower_y2}
+        left_wall_x = bath["x2"] + 1
+        right_wall_x = bedroom["x1"] - 1
 
     common = {
         "type": "Common",
@@ -336,31 +225,95 @@ def build_five_room(width, height):
         "y2": lower_y2,
     }
 
-    # Left side split into Bedroom + Bath compact
+    if common["x2"] - common["x1"] + 1 < 7:
+        return None, "common too narrow"
+
+    # Bedroom gets exactly one door to common
+    if kitchen_side == "left":
+        draw_vertical_wall(grid, left_wall_x, lower_y1, lower_y2, door_y=segment_center(lower_y1, lower_y2))
+        draw_vertical_wall(grid, right_wall_x, lower_y1, bath["y1"] - 2, door_y=None)
+    else:
+        draw_vertical_wall(grid, right_wall_x, lower_y1, lower_y2, door_y=segment_center(lower_y1, lower_y2))
+        draw_vertical_wall(grid, left_wall_x, lower_y1, bath["y1"] - 2, door_y=None)
+
+    # Bath gets exactly one door from above into common-adjacent pocket
+    draw_horizontal_wall(grid, bath["x1"], bath["x2"], bath["y1"] - 1, door_x=segment_center(bath["x1"], bath["x2"]))
+
+    rooms = [kitchen, bedroom, common, bath]
+    return (grid, rooms), "ok"
+
+
+def build_five_room_template_a(width, height, kitchen_side):
+    """
+    5 rooms:
+    Kitchen back-left/right
+    Common big center/front
+    2 Bedrooms
+    1 compact Bath
+    """
+    grid = create_empty_grid(width, height)
+    draw_outer_walls(grid, width, height)
+
+    kitchen_h = 3
+    split_y = kitchen_h + 1
+    lower_y1 = split_y + 1
+    lower_y2 = height - 2
+    lower_h = lower_y2 - lower_y1 + 1
+
+    kitchen_w = random.choice([5, 7])
+    side_room_w = 5
     bath_h = 3
+
+    if kitchen_side == "left":
+        kitchen = {"type": "Kitchen", "x1": 1, "x2": kitchen_w, "y1": 1, "y2": kitchen_h}
+        upper_other_x1 = kitchen_w + 2
+        upper_other_x2 = width - 2
+        top_divider_x = kitchen["x2"] + 1
+    else:
+        kitchen = {"type": "Kitchen", "x1": width - 1 - kitchen_w, "x2": width - 2, "y1": 1, "y2": kitchen_h}
+        upper_other_x1 = 1
+        upper_other_x2 = kitchen["x1"] - 2
+        top_divider_x = kitchen["x1"] - 1
+
+    if upper_other_x2 - upper_other_x1 + 1 < 7:
+        return None, "top span too small"
+
+    kitchen_common_door_x = segment_center(upper_other_x1, upper_other_x2)
+    draw_horizontal_wall(grid, 1, width - 2, split_y, door_x=kitchen_common_door_x)
+    draw_vertical_wall(grid, top_divider_x, 1, kitchen_h, door_y=segment_center(1, kitchen_h))
+
+    left_wall_x = side_room_w + 1
+    right_wall_x = width - 2 - side_room_w
+
+    common = {
+        "type": "Common",
+        "x1": left_wall_x + 1,
+        "x2": right_wall_x - 1,
+        "y1": lower_y1,
+        "y2": lower_y2,
+    }
+
+    if common["x2"] - common["x1"] + 1 < 7:
+        return None, "common too narrow"
+
+    # left column split into bedroom + bath
     left_split_y = lower_y2 - bath_h
     if left_split_y - lower_y1 < 2:
-        return None
+        return None, "left column too short"
 
     bedroom1 = {"type": "Bedroom", "x1": 1, "x2": left_wall_x - 1, "y1": lower_y1, "y2": left_split_y - 1}
     bath = {"type": "Bath", "x1": 1, "x2": left_wall_x - 1, "y1": left_split_y + 1, "y2": lower_y2}
-
     bedroom2 = {"type": "Bedroom", "x1": right_wall_x + 1, "x2": width - 2, "y1": lower_y1, "y2": lower_y2}
 
-    # Common connections only
-    left_common_door_y = segment_center(lower_y1, lower_y2)
-    right_common_door_y = segment_center(lower_y1, lower_y2)
-    draw_vertical_wall(grid, left_wall_x, lower_y1, lower_y2, door_y=left_common_door_y)
-    draw_vertical_wall(grid, right_wall_x, lower_y1, lower_y2, door_y=right_common_door_y)
+    # Bedroom2 gets one door to common
+    draw_vertical_wall(grid, right_wall_x, lower_y1, lower_y2, door_y=segment_center(lower_y1, lower_y2))
 
-    # Split left column into bedroom+bath with one centered door into bath from above
-    bath_door_x = segment_center(bath["x1"], bath["x2"])
-    draw_horizontal_wall(grid, bath["x1"], bath["x2"], bath["y1"] - 1, door_x=bath_door_x)
+    # Left side: one common connection for upper bedroom, one compact bath entry from above
+    draw_vertical_wall(grid, left_wall_x, lower_y1, lower_y2, door_y=segment_center(lower_y1, left_split_y - 1))
+    draw_horizontal_wall(grid, bath["x1"], bath["x2"], bath["y1"] - 1, door_x=segment_center(bath["x1"], bath["x2"]))
 
     rooms = [kitchen, bedroom1, common, bath, bedroom2]
-
-    start, end = place_exterior_doors(grid, width, height, kitchen, common)
-    return grid, rooms, start, end
+    return (grid, rooms), "ok"
 
 
 def plot_house(grid, rooms, labels, width, height):
@@ -419,58 +372,77 @@ def plot_house(grid, rooms, labels, width, height):
 
 
 def validate_room_sizes(rooms):
-    """
-    Enforce:
-    Common > Kitchen > Bedrooms > Bath
-    """
     common = next(r for r in rooms if r["type"] == "Common")
     kitchen = next(r for r in rooms if r["type"] == "Kitchen")
     bath = next(r for r in rooms if r["type"] == "Bath")
     bedrooms = [r for r in rooms if r["type"] == "Bedroom"]
 
     if not (room_area(common) > room_area(kitchen)):
-        return False
+        return False, "common not bigger than kitchen"
     if not all(room_area(kitchen) > room_area(b) for b in bedrooms):
-        return False
+        return False, "kitchen not bigger than bedroom"
     if not all(room_area(b) > room_area(bath) for b in bedrooms):
-        return False
+        return False, "bedroom not bigger than bath"
 
-    # Bath should be compact, not long
     bath_w = bath["x2"] - bath["x1"] + 1
     bath_h = bath["y2"] - bath["y1"] + 1
     if max(bath_w, bath_h) > 5:
-        return False
+        return False, "bath too long"
 
-    return True
+    return True, "ok"
 
 
-def generate_valid_house():
-    attempts = 0
+def try_generate_once(attempt):
+    width = random.choice(odd_choices(MIN_WIDTH, MAX_WIDTH))
+    height = random.choice(odd_choices(MIN_HEIGHT, MAX_HEIGHT))
+    house_type = random.choice(["4-room", "5-room"])
+    kitchen_side = random.choice(["left", "right"])
 
-    while True:
-        attempts += 1
+    print(f"  Attempt {attempt}: size={width}x{height}, type={house_type}, kitchen={kitchen_side}")
 
-        width = random.choice(odd_choices(MIN_WIDTH, MAX_WIDTH))
-        height = random.choice(odd_choices(MIN_HEIGHT, MAX_HEIGHT))
+    if house_type == "4-room":
+        result, reason = build_four_room_template_a(width, height, kitchen_side)
+    else:
+        result, reason = build_five_room_template_a(width, height, kitchen_side)
 
-        builder = random.choice([build_four_room, build_five_room])
-        result = builder(width, height)
+    if result is None:
+        print(f"    Rejected during template build: {reason}")
+        return None
 
-        if result is None:
-            continue
+    grid, rooms = result
+    labels = assign_labels(rooms)
 
-        grid, rooms, start, end = result
+    start, end, front_mode = place_exterior_doors(
+        grid,
+        width,
+        height,
+        next(r for r in rooms if r["type"] == "Kitchen"),
+        next(r for r in rooms if r["type"] == "Common"),
+    )
+    print(f"    Door mode: front={front_mode}")
 
-        if not validate_room_sizes(rooms):
-            continue
+    valid_sizes, reason = validate_room_sizes(rooms)
+    if not valid_sizes:
+        print(f"    Rejected during size validation: {reason}")
+        return None
 
-        path = find_path(grid, start, end, width, height)
-        if not path:
-            continue
+    path = find_path(grid, start, end, width, height)
+    if not path:
+        print("    Rejected during path check: no valid B-to-F path")
+        return None
 
-        draw_path(grid, path)
-        labels = assign_labels(rooms)
-        return grid, rooms, labels, width, height, attempts
+    draw_path(grid, path)
+    print("    Accepted")
+    return grid, rooms, labels, width, height, attempt
+
+
+def generate_valid_house(max_attempts=200):
+    for attempt in range(1, max_attempts + 1):
+        result = try_generate_once(attempt)
+        if result is not None:
+            return result
+
+    raise RuntimeError(f"Failed to generate a valid house after {max_attempts} attempts")
 
 
 if __name__ == "__main__":
