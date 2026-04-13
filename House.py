@@ -3,12 +3,10 @@ import time
 from collections import deque
 import matplotlib.pyplot as plt
 
-
 MIN_WIDTH = 25
 MAX_WIDTH = 35   # odd only
 MIN_HEIGHT = 19
 MAX_HEIGHT = 27  # odd only
-
 
 EXTRA_ROOM_TYPES = ["Bedroom", "Office", "Laundry", "Storage", "Garage"]
 
@@ -47,7 +45,8 @@ def carve_room(grid, room):
 
 
 def carve_cell(grid, x, y, char=" "):
-    grid[y][x] = char
+    if 0 <= y < len(grid) and 0 <= x < len(grid[0]):
+        grid[y][x] = char
 
 
 def carve_vertical_corridor(grid, x, y1, y2):
@@ -61,7 +60,6 @@ def carve_horizontal_corridor(grid, x1, x2, y):
 
 
 def carve_corridor_L(grid, x1, y1, x2, y2):
-    # randomize bend order for slight variety
     if random.random() < 0.5:
         carve_horizontal_corridor(grid, x1, x2, y1)
         carve_vertical_corridor(grid, x2, y1, y2)
@@ -114,8 +112,9 @@ def assign_labels(rooms, width, height):
     for i, room in enumerate(rooms):
         rtype = room["type"]
 
-        if rtype == "Bedroom":
-            # bottom-right bedroom can become garage 50% of the time
+        if rtype in {"Kitchen", "Dining", "Common", "Bath", "Porch", "Office", "Laundry", "Storage", "Garage"}:
+            labels[i] = rtype
+        elif rtype == "Bedroom":
             if room["x2"] == width - 2 and room["y2"] == height - 2 and random.random() < 0.5:
                 labels[i] = "Garage"
             else:
@@ -232,7 +231,6 @@ def build_house_layout(width, height):
     right_top_type = random.choice(EXTRA_ROOM_TYPES)
     right_bottom_type = random.choice(EXTRA_ROOM_TYPES)
 
-    # keep required bedroom in house
     if right_top_type == "Garage":
         right_top_type = "Bedroom"
     if right_bottom_type == "Garage":
@@ -264,13 +262,15 @@ def build_house_layout(width, height):
     # --- Optional extras to reach 5–8 rooms ---
     target_total = random.choice([5, 6, 7, 8])
 
+    optional_rooms = []
+
     # left upper pod
     if top_h + 3 < common["y1"] - 1:
         pod_h = random.choice([3, 5])
         pod_y1 = top_h + 2
         pod_y2 = min(common["y1"] - 2, pod_y1 + pod_h - 1)
         if pod_y1 <= pod_y2:
-            rooms.append({
+            optional_rooms.append({
                 "type": random.choice(EXTRA_ROOM_TYPES),
                 "x1": left_x1,
                 "x2": left_x2,
@@ -279,12 +279,12 @@ def build_house_layout(width, height):
             })
 
     # right upper pod
-    if len(rooms) < target_total and top_h + 3 < common["y1"] - 1:
+    if top_h + 3 < common["y1"] - 1:
         pod_h = random.choice([3, 5])
         pod_y1 = top_h + 2
         pod_y2 = min(common["y1"] - 2, pod_y1 + pod_h - 1)
         if pod_y1 <= pod_y2:
-            rooms.append({
+            optional_rooms.append({
                 "type": random.choice(EXTRA_ROOM_TYPES),
                 "x1": right_x1,
                 "x2": right_x2,
@@ -293,39 +293,39 @@ def build_house_layout(width, height):
             })
 
     # lower-left pod
-    if len(rooms) < target_total:
-        pod_y1 = bath["y2"] + 2
-        pod_h = random.choice([3, 5])
-        pod_y2 = min(height - 2, pod_y1 + pod_h - 1)
-        if pod_y1 <= pod_y2:
-            rooms.append({
-                "type": random.choice(EXTRA_ROOM_TYPES),
-                "x1": left_x1,
-                "x2": left_x2,
-                "y1": pod_y1,
-                "y2": pod_y2,
-            })
+    pod_y1 = bath["y2"] + 2
+    pod_h = random.choice([3, 5])
+    pod_y2 = min(height - 2, pod_y1 + pod_h - 1)
+    if pod_y1 <= pod_y2:
+        optional_rooms.append({
+            "type": random.choice(EXTRA_ROOM_TYPES),
+            "x1": left_x1,
+            "x2": left_x2,
+            "y1": pod_y1,
+            "y2": pod_y2,
+        })
 
-    # add porch last
+    # lower-right mid pod
+    pod_y1 = common["y1"] + random.choice([1, 3, 5])
+    pod_h = random.choice([3, 5])
+    pod_y2 = min(common["y2"], pod_y1 + pod_h - 1)
+    if pod_y1 <= pod_y2:
+        optional_rooms.append({
+            "type": random.choice(EXTRA_ROOM_TYPES),
+            "x1": right_x1,
+            "x2": right_x2,
+            "y1": pod_y1,
+            "y2": pod_y2,
+        })
+
+    random.shuffle(optional_rooms)
+    for room in optional_rooms:
+        if len(rooms) >= target_total:
+            break
+        rooms.append(room)
+
     if porch:
         rooms.append(porch)
-
-    # trim to target count, but keep core rooms
-    core_rooms = [kitchen, dining, common, first_bedroom, bath]
-    optional_rooms = [r for r in rooms if r not in core_rooms]
-    random.shuffle(optional_rooms)
-    rooms = core_rooms + optional_rooms[: max(0, target_total - len(core_rooms))]
-
-    # keep porch if used
-    if porch and porch not in rooms:
-        if len(rooms) < 8:
-            rooms.append(porch)
-        else:
-            # replace one optional non-porch room
-            for i in range(len(rooms) - 1, -1, -1):
-                if rooms[i] not in core_rooms:
-                    rooms[i] = porch
-                    break
 
     # carve all rooms
     for room in rooms:
@@ -336,11 +336,11 @@ def build_house_layout(width, height):
     dining_cx, dining_cy = room_center(dining)
     carve_corridor_L(grid, kitchen_cx, kitchen_cy, dining_cx, dining_cy)
 
-    # connect dining to common
-    common_cx, common_cy = room_center(common)
+    # connect dining to top of common
+    common_cx, _ = room_center(common)
     carve_corridor_L(grid, dining_cx, dining_cy, common_cx, common["y1"])
 
-    # connect required side rooms to common
+    # connect required side rooms
     bed_cx, bed_cy = room_center(first_bedroom)
     carve_corridor_L(grid, bed_cx, bed_cy, common["x1"], bed_cy)
 
@@ -354,16 +354,29 @@ def build_house_layout(width, height):
     if not use_porch:
         carve_corridor_L(grid, rb_cx, rb_cy, common["x2"], rb_cy)
 
-    # connect optional rooms to common
+    # FIXED: optional rooms get real door-to-door style connectors
     for room in rooms:
         if room in [kitchen, dining, common, first_bedroom, bath, right_top, right_bottom]:
             continue
         if room == porch:
             continue
+
         cx, cy = room_center(room)
-        # connect from nearest side of common
-        target_x = common["x1"] if cx < common_cx else common["x2"]
-        carve_corridor_L(grid, cx, cy, target_x, cy)
+
+        if cx < common_cx:
+            door_x = room["x2"] + 1
+            door_y = cy
+            carve_cell(grid, door_x, door_y)
+            target_x = common["x1"] - 1
+            carve_horizontal_corridor(grid, door_x, target_x, door_y)
+            carve_cell(grid, common["x1"], door_y)
+        else:
+            door_x = room["x1"] - 1
+            door_y = cy
+            carve_cell(grid, door_x, door_y)
+            target_x = common["x2"] + 1
+            carve_horizontal_corridor(grid, target_x, door_x, door_y)
+            carve_cell(grid, common["x2"], door_y)
 
     # porch
     if porch:
@@ -372,7 +385,6 @@ def build_house_layout(width, height):
         carve_cell(grid, porch_cx, height - 1, "F")
         end = (porch_cx, height - 2)
     else:
-        # front door opens directly to common, offset if possible
         fx_candidates = [common_cx, common_cx - 2, common_cx + 2]
         fx_candidates = [x for x in fx_candidates if common["x1"] <= x <= common["x2"] and x != kitchen_cx]
         if not fx_candidates:
