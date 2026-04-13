@@ -107,9 +107,6 @@ def draw_path(grid, path):
 
 
 def partition_vertical_strip(x1, x2, y1, y2, min_room_h=3, max_room_h=9):
-    """
-    Split a vertical strip into stacked rooms with 1-cell walls between them.
-    """
     rooms = []
     cur_y = y1
 
@@ -120,7 +117,6 @@ def partition_vertical_strip(x1, x2, y1, y2, min_room_h=3, max_room_h=9):
 
         max_h = min(max_room_h, remaining)
 
-        # leave room for another segment + wall if possible
         possible_heights = []
         for h in range(min_room_h, max_h + 1):
             leftover = remaining - h
@@ -133,16 +129,12 @@ def partition_vertical_strip(x1, x2, y1, y2, min_room_h=3, max_room_h=9):
         h = random.choice(possible_heights)
         room = {"x1": x1, "x2": x2, "y1": cur_y, "y2": cur_y + h - 1}
         rooms.append(room)
-
         cur_y = room["y2"] + 2
 
     return rooms
 
 
 def partition_horizontal_strip(x1, x2, y1, y2, min_room_w=5, max_room_w=11):
-    """
-    Split a horizontal strip into side-by-side rooms with 1-cell walls between them.
-    """
     rooms = []
     cur_x = x1
 
@@ -165,32 +157,25 @@ def partition_horizontal_strip(x1, x2, y1, y2, min_room_w=5, max_room_w=11):
         w = random.choice(possible_widths)
         room = {"x1": cur_x, "x2": cur_x + w - 1, "y1": y1, "y2": y2}
         rooms.append(room)
-
         cur_x = room["x2"] + 2
 
     return rooms
 
 
-def choose_room_labels(candidate_rooms, width, height):
+def choose_room_labels(candidate_rooms):
     """
-    Label rooms after geometry is set.
-
-    Rules:
     - smallest room = Bath
-    - must have at least one Bedroom
-    - remaining use Bedroom/Office/Laundry/Storage/Garage
-      with no repeats except Bedroom
+    - at least one Bedroom
+    - no repeats except Bedroom
     """
     rooms_sorted = sorted(candidate_rooms, key=room_area)
     labels = {}
 
-    # smallest room becomes Bath
     bath_room = rooms_sorted[0]
     labels[id(bath_room)] = "Bath"
 
     remaining = [r for r in rooms_sorted if id(r) not in labels]
 
-    # first bedroom: choose the largest remaining so it feels like a real bedroom
     if remaining:
         first_bedroom = max(remaining, key=room_area)
         labels[id(first_bedroom)] = "Bedroom"
@@ -199,7 +184,6 @@ def choose_room_labels(candidate_rooms, width, height):
     available_unique = ["Office", "Laundry", "Storage", "Garage"]
 
     for room in remaining:
-        # Bedroom can always repeat
         choices = ["Bedroom"] + available_unique[:]
         chosen = random.choice(choices)
 
@@ -214,17 +198,15 @@ def choose_room_labels(candidate_rooms, width, height):
 def assign_final_labels(rooms, width, height):
     labels = {}
 
-    special_rooms = []
     candidate_rooms = []
-
     for room in rooms:
-        if room["type"] in {"Kitchen", "Dining", "Common", "Porch"}:
-            labels[id(room)] = room["type"]
-            special_rooms.append(room)
+        room_type = room.get("type")
+        if room_type in {"Kitchen", "Dining", "Common", "Porch"}:
+            labels[id(room)] = room_type
         else:
             candidate_rooms.append(room)
 
-    generated = choose_room_labels(candidate_rooms, width, height)
+    generated = choose_room_labels(candidate_rooms)
     labels.update(generated)
 
     # 50% chance bottom-right Bedroom becomes Garage
@@ -268,8 +250,7 @@ def build_house_layout(width, height):
 
     kitchen_side = random.choice(["left", "right"])
 
-    # 1) overall dimensions already chosen
-    # 2) kitchen in either left or right back
+    # Kitchen
     kitchen_h = random.choice([5, 7, 9])
     kitchen_w = random.choice([5, 7, 9])
 
@@ -285,15 +266,13 @@ def build_house_layout(width, height):
     if dining["x2"] - dining["x1"] + 1 < 7:
         return None, "dining too small"
 
-    # 3–8) build around a central common room
+    # Common
     lower_y1 = kitchen_h + 3
-    lower_y2 = height - 2
-
     common_margin_x = random.choice([7, 9, 11])
     common_x1 = common_margin_x
     common_x2 = width - common_margin_x - 1
-
     common_margin_bottom = random.choice([3, 5, 7])
+
     common_y1 = lower_y1
     common_y2 = height - common_margin_bottom
 
@@ -304,7 +283,7 @@ def build_house_layout(width, height):
     if common["y2"] - common["y1"] + 1 < 7:
         return None, "common too short"
 
-    # 9) optionally make a porch if common is large enough
+    # Porch
     porch = None
     if room_area(common) > 140 and random.random() < 0.6:
         porch_w = random.choice([5, 7])
@@ -322,72 +301,60 @@ def build_house_layout(width, height):
 
     rooms = [kitchen, dining, common]
 
-    # left stripe (all connect to common)
+    # Left stripe
     left_x1 = 1
     left_x2 = common["x1"] - 2
     if left_x2 - left_x1 + 1 >= 5:
-        left_rooms = partition_vertical_strip(
-            left_x1, left_x2, common["y1"], common["y2"], min_room_h=3, max_room_h=9
-        )
+        left_rooms = partition_vertical_strip(left_x1, left_x2, common["y1"], common["y2"], min_room_h=3, max_room_h=9)
         rooms.extend(left_rooms)
 
-    # right stripe (all connect to common)
+    # Right stripe
     right_x1 = common["x2"] + 2
     right_x2 = width - 2
     if right_x2 - right_x1 + 1 >= 5:
-        right_rooms = partition_vertical_strip(
-            right_x1, right_x2, common["y1"], common["y2"], min_room_h=3, max_room_h=9
-        )
+        right_rooms = partition_vertical_strip(right_x1, right_x2, common["y1"], common["y2"], min_room_h=3, max_room_h=9)
         rooms.extend(right_rooms)
 
-    # bottom stripe (all connect to common)
+    # Bottom stripe
     bottom_y1 = common["y2"] + 2
     bottom_y2 = height - 2
     if porch:
         bottom_y2 = porch["y1"] - 2
 
     if bottom_y2 - bottom_y1 + 1 >= 3:
-        bottom_rooms = partition_horizontal_strip(
-            common["x1"], common["x2"], bottom_y1, bottom_y2, min_room_w=5, max_room_w=11
-        )
+        bottom_rooms = partition_horizontal_strip(common["x1"], common["x2"], bottom_y1, bottom_y2, min_room_w=5, max_room_w=11)
         rooms.extend(bottom_rooms)
 
     if porch:
         rooms.append(porch)
 
-    # carve rooms
+    # Carve rooms
     for room in rooms:
         carve_room(grid, room)
 
-    # 10) add doors and check path
+    # Main path: B -> Kitchen -> Dining -> Common -> F
     kitchen_cx, kitchen_cy = room_center(kitchen)
     dining_cx, dining_cy = room_center(dining)
     common_cx, common_cy = room_center(common)
 
-    # B -> kitchen -> dining -> common
     carve_corridor_L(grid, kitchen_cx, kitchen_cy, dining_cx, dining_cy)
     carve_corridor_L(grid, dining_cx, dining_cy, common_cx, common["y1"])
 
-    # all side rooms to common
+    # Side rooms to common
     for room in rooms:
-        if room["type"] in {"Kitchen", "Dining", "Common", "Porch"}:
+        if room is kitchen or room is dining or room is common or room is porch:
             continue
 
         cx, cy = room_center(room)
 
-        # left rooms
         if room["x2"] < common["x1"]:
             carve_corridor_L(grid, cx, cy, common["x1"], cy)
-
-        # right rooms
         elif room["x1"] > common["x2"]:
             carve_corridor_L(grid, cx, cy, common["x2"], cy)
-
-        # bottom rooms
         elif room["y1"] > common["y2"]:
             carve_corridor_L(grid, cx, cy, cx, common["y2"])
 
-    # front door
+    # Front door
     if porch:
         porch_cx, porch_cy = room_center(porch)
         carve_corridor_L(grid, porch_cx, porch_cy, common_cx, common["y2"])
@@ -402,6 +369,7 @@ def build_house_layout(width, height):
         carve_cell(grid, fx, height - 1, "F")
         end = (fx, height - 2)
 
+    # Back door
     carve_cell(grid, kitchen_cx, 0, "B")
     start = (kitchen_cx, 1)
 
