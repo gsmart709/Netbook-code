@@ -79,6 +79,11 @@ def room_area(room):
 
 
 def place_exterior_doors(grid, width, height, kitchen_room, common_room):
+    """
+    B is always on the back (top) and kitchen is always back-left or back-right.
+    F is always on the front (bottom) and can be center / offset left / offset right.
+    B must never line up exactly with F.
+    """
     bx = segment_center(kitchen_room["x1"], kitchen_room["x2"])
 
     modes = ["center", "left", "right"]
@@ -228,7 +233,6 @@ def build_four_room_template_a(width, height, kitchen_side):
     if common["x2"] - common["x1"] + 1 < 7:
         return None, "common too narrow"
 
-    # Bedroom gets exactly one door to common
     if kitchen_side == "left":
         draw_vertical_wall(grid, left_wall_x, lower_y1, lower_y2, door_y=segment_center(lower_y1, lower_y2))
         draw_vertical_wall(grid, right_wall_x, lower_y1, bath["y1"] - 2, door_y=None)
@@ -236,7 +240,6 @@ def build_four_room_template_a(width, height, kitchen_side):
         draw_vertical_wall(grid, right_wall_x, lower_y1, lower_y2, door_y=segment_center(lower_y1, lower_y2))
         draw_vertical_wall(grid, left_wall_x, lower_y1, bath["y1"] - 2, door_y=None)
 
-    # Bath gets exactly one door from above into common-adjacent pocket
     draw_horizontal_wall(grid, bath["x1"], bath["x2"], bath["y1"] - 1, door_x=segment_center(bath["x1"], bath["x2"]))
 
     rooms = [kitchen, bedroom, common, bath]
@@ -296,7 +299,6 @@ def build_five_room_template_a(width, height, kitchen_side):
     if common["x2"] - common["x1"] + 1 < 7:
         return None, "common too narrow"
 
-    # left column split into bedroom + bath
     left_split_y = lower_y2 - bath_h
     if left_split_y - lower_y1 < 2:
         return None, "left column too short"
@@ -305,10 +307,7 @@ def build_five_room_template_a(width, height, kitchen_side):
     bath = {"type": "Bath", "x1": 1, "x2": left_wall_x - 1, "y1": left_split_y + 1, "y2": lower_y2}
     bedroom2 = {"type": "Bedroom", "x1": right_wall_x + 1, "x2": width - 2, "y1": lower_y1, "y2": lower_y2}
 
-    # Bedroom2 gets one door to common
     draw_vertical_wall(grid, right_wall_x, lower_y1, lower_y2, door_y=segment_center(lower_y1, lower_y2))
-
-    # Left side: one common connection for upper bedroom, one compact bath entry from above
     draw_vertical_wall(grid, left_wall_x, lower_y1, lower_y2, door_y=segment_center(lower_y1, left_split_y - 1))
     draw_horizontal_wall(grid, bath["x1"], bath["x2"], bath["y1"] - 1, door_x=segment_center(bath["x1"], bath["x2"]))
 
@@ -379,9 +378,11 @@ def validate_room_sizes(rooms):
 
     if not (room_area(common) > room_area(kitchen)):
         return False, "common not bigger than kitchen"
-    if not all(room_area(kitchen) > room_area(b) for b in bedrooms):
-        return False, "kitchen not bigger than bedroom"
-    if not all(room_area(b) > room_area(bath) for b in bedrooms):
+
+    if bedrooms and not all(room_area(common) > room_area(b) for b in bedrooms):
+        return False, "common not bigger than bedroom"
+
+    if bedrooms and not all(room_area(b) > room_area(bath) for b in bedrooms):
         return False, "bedroom not bigger than bath"
 
     bath_w = bath["x2"] - bath["x1"] + 1
@@ -420,6 +421,7 @@ def try_generate_once(attempt):
         next(r for r in rooms if r["type"] == "Common"),
     )
     print(f"    Door mode: front={front_mode}")
+    print(f"    Room areas: {[(r['type'], room_area(r)) for r in rooms]}")
 
     valid_sizes, reason = validate_room_sizes(rooms)
     if not valid_sizes:
