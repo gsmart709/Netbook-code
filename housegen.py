@@ -3,12 +3,12 @@ import time
 from collections import deque
 import matplotlib.pyplot as plt
 
-MIN_WIDTH = 27
-MAX_WIDTH = 51   # odd only
+MIN_WIDTH = 25
+MAX_WIDTH = 49   # odd only
 MIN_HEIGHT = 19
 MAX_HEIGHT = 37  # odd only
 
-UNIQUE_ROOM_TYPES = ["Office", "Laundry", "Storage", "Garage"]
+ROOM_TYPES_AFTER_FIRST_BED = ["Bedroom", "Office", "Laundry", "Storage", "Garage"]
 
 
 def odd_choices(start, end):
@@ -49,17 +49,23 @@ def carve_cell(grid, x, y, char=" "):
         grid[y][x] = char
 
 
+def carve_vertical_corridor(grid, x, y1, y2):
+    for y in range(min(y1, y2), max(y1, y2) + 1):
+        carve_cell(grid, x, y)
+
+
+def carve_horizontal_corridor(grid, x1, x2, y):
+    for x in range(min(x1, x2), max(x1, x2) + 1):
+        carve_cell(grid, x, y)
+
+
 def carve_corridor_L(grid, x1, y1, x2, y2):
     if random.random() < 0.5:
-        for x in range(min(x1, x2), max(x1, x2) + 1):
-            carve_cell(grid, x, y1)
-        for y in range(min(y1, y2), max(y1, y2) + 1):
-            carve_cell(grid, x2, y)
+        carve_horizontal_corridor(grid, x1, x2, y1)
+        carve_vertical_corridor(grid, x2, y1, y2)
     else:
-        for y in range(min(y1, y2), max(y1, y2) + 1):
-            carve_cell(grid, x1, y)
-        for x in range(min(x1, x2), max(x1, x2) + 1):
-            carve_cell(grid, x, y2)
+        carve_vertical_corridor(grid, x1, y1, y2)
+        carve_horizontal_corridor(grid, x1, x2, y2)
 
 
 def find_path(grid, start, end, width, height):
@@ -100,47 +106,115 @@ def draw_path(grid, path):
             grid[y][x] = "."
 
 
-def choose_labels(candidate_rooms, width, height):
-    """
-    Rules:
-    - smallest = Bath
-    - one Bedroom first
-    - after that: Bedroom may repeat, other types no repeats
-    """
-    labels = {}
-    if not candidate_rooms:
-        return labels
+def partition_vertical_strip(x1, x2, y1, y2, min_room_h=3, max_room_h=9):
+    rooms = []
+    cur_y = y1
 
+    while cur_y <= y2:
+        remaining = y2 - cur_y + 1
+        if remaining < min_room_h:
+            break
+
+        max_h = min(max_room_h, remaining)
+
+        possible_heights = []
+        for h in range(min_room_h, max_h + 1):
+            leftover = remaining - h
+            if leftover == 0 or leftover >= min_room_h + 1:
+                possible_heights.append(h)
+
+        if not possible_heights:
+            break
+
+        h = random.choice(possible_heights)
+        room = {"x1": x1, "x2": x2, "y1": cur_y, "y2": cur_y + h - 1}
+        rooms.append(room)
+        cur_y = room["y2"] + 2
+
+    return rooms
+
+
+def partition_horizontal_strip(x1, x2, y1, y2, min_room_w=5, max_room_w=11):
+    rooms = []
+    cur_x = x1
+
+    while cur_x <= x2:
+        remaining = x2 - cur_x + 1
+        if remaining < min_room_w:
+            break
+
+        max_w = min(max_room_w, remaining)
+
+        possible_widths = []
+        for w in range(min_room_w, max_w + 1):
+            leftover = remaining - w
+            if leftover == 0 or leftover >= min_room_w + 1:
+                possible_widths.append(w)
+
+        if not possible_widths:
+            break
+
+        w = random.choice(possible_widths)
+        room = {"x1": cur_x, "x2": cur_x + w - 1, "y1": y1, "y2": y2}
+        rooms.append(room)
+        cur_x = room["x2"] + 2
+
+    return rooms
+
+
+def choose_room_labels(candidate_rooms):
+    """
+    - smallest room = Bath
+    - at least one Bedroom
+    - no repeats except Bedroom
+    """
     rooms_sorted = sorted(candidate_rooms, key=room_area)
+    labels = {}
 
-    # smallest = bath
     bath_room = rooms_sorted[0]
     labels[id(bath_room)] = "Bath"
 
     remaining = [r for r in rooms_sorted if id(r) not in labels]
 
-    # largest remaining = first bedroom
     if remaining:
-        first_bed = max(remaining, key=room_area)
-        labels[id(first_bed)] = "Bedroom"
+        first_bedroom = max(remaining, key=room_area)
+        labels[id(first_bedroom)] = "Bedroom"
         remaining = [r for r in remaining if id(r) not in labels]
 
-    available_unique = UNIQUE_ROOM_TYPES[:]
+    available_unique = ["Office", "Laundry", "Storage", "Garage"]
 
     for room in remaining:
         choices = ["Bedroom"] + available_unique[:]
         chosen = random.choice(choices)
-        labels[id(room)] = chosen
 
-        if chosen in available_unique:
+        if chosen != "Bedroom" and chosen in available_unique:
             available_unique.remove(chosen)
 
-    # 50% chance bottom-right bedroom becomes garage
-    for room in remaining + ([first_bed] if 'first_bed' in locals() else []):
+        labels[id(room)] = chosen
+
+    return labels
+
+
+def assign_final_labels(rooms, width, height):
+    labels = {}
+
+    candidate_rooms = []
+    for room in rooms:
+        room_type = room.get("type")
+        if room_type in {"Kitchen", "Dining", "Common", "Porch"}:
+            labels[id(room)] = room_type
+        else:
+            candidate_rooms.append(room)
+
+    generated = choose_room_labels(candidate_rooms)
+    labels.update(generated)
+
+    # 50% chance bottom-right Bedroom becomes Garage
+    for room in candidate_rooms:
         if (
-            labels.get(id(room)) == "Bedroom"
+            labels[id(room)] == "Bedroom"
             and room["x2"] == width - 2
-            and room["y2"] >= height - 5
+            and room["y2"] == height - 2
             and random.random() < 0.5
         ):
             labels[id(room)] = "Garage"
@@ -148,217 +222,161 @@ def choose_labels(candidate_rooms, width, height):
     return labels
 
 
+def validate_room_sizes(rooms, labels):
+    common = next(r for r in rooms if labels[id(r)] == "Common")
+    kitchen = next(r for r in rooms if labels[id(r)] == "Kitchen")
+    bath = next(r for r in rooms if labels[id(r)] == "Bath")
+    bedrooms = [r for r in rooms if labels[id(r)] == "Bedroom"]
+
+    if room_area(common) <= room_area(kitchen):
+        return False, "common not bigger than kitchen"
+
+    if bedrooms and not all(room_area(common) > room_area(b) for b in bedrooms):
+        return False, "common not bigger than bedroom"
+
+    if bedrooms and not all(room_area(b) > room_area(bath) for b in bedrooms):
+        return False, "bedroom not bigger than bath"
+
+    bw = bath["x2"] - bath["x1"] + 1
+    bh = bath["y2"] - bath["y1"] + 1
+    if max(bw, bh) > 5:
+        return False, "bath too large"
+
+    return True, "ok"
+
+
 def build_house_layout(width, height):
     grid = create_wall_grid(width, height)
 
     kitchen_side = random.choice(["left", "right"])
-    kitchen_w = random.choice([7, 9, 11])
+
+    # Kitchen
     kitchen_h = random.choice([5, 7, 9])
-
-    use_porch = random.random() < 0.5
-    use_dining_split = random.random() < 0.5
-
-    bottom_room_limit = height - (5 if use_porch else 2)
+    kitchen_w = random.choice([5, 7, 9])
 
     if kitchen_side == "left":
-        # 1-2 kitchen
         kitchen = {"type": "Kitchen", "x1": 1, "x2": kitchen_w, "y1": 1, "y2": kitchen_h}
-        divider_x = kitchen_w + 1
-
-        # opposite top strip
-        dining = {"type": "Dining", "x1": divider_x + 1, "x2": width - 2, "y1": 1, "y2": kitchen_h}
-
-        # 3 vertical line from kitchen down
-        # represented by not carving divider_x
-
-        # 4 left lower rectangle split horizontally into 2 rooms
-        left_x1 = 1
-        left_x2 = divider_x - 1
-        left_y1 = kitchen_h + 2
-        left_y2 = bottom_room_limit
-
-        if left_y2 - left_y1 < 6:
-            return None, "left strip too short"
-
-        split_left_y = random.randint(left_y1 + 2, left_y2 - 3)
-
-        left_top = {"x1": left_x1, "x2": left_x2, "y1": left_y1, "y2": split_left_y - 1}
-        left_bottom = {"x1": left_x1, "x2": left_x2, "y1": split_left_y + 1, "y2": left_y2}
-
-        # 5 bottom horizontal kitchen line already implied by split at y = kitchen_h + 1
-
-        # 6 divide big right rectangle vertically into common + right strip
-        big_x1 = divider_x + 1
-        big_x2 = width - 2
-        big_y1 = kitchen_h + 2
-        big_y2 = bottom_room_limit
-
-        if big_x2 - big_x1 < 12:
-            return None, "main body too narrow"
-
-        divider2_x = random.randint(big_x1 + 8, big_x2 - 6)
-
-        common = {"type": "Common", "x1": big_x1, "x2": divider2_x - 1, "y1": big_y1, "y2": big_y2}
-        right_strip_x1 = divider2_x + 1
-        right_strip_x2 = big_x2
-
-        # 7 split right strip horizontally into possible 2 rooms
-        right_rooms = []
-        if right_strip_x2 - right_strip_x1 >= 4:
-            if big_y2 - big_y1 >= 6:
-                split_right_y = random.randint(big_y1 + 2, big_y2 - 3)
-                right_top = {"x1": right_strip_x1, "x2": right_strip_x2, "y1": big_y1, "y2": split_right_y - 1}
-                right_bottom = {"x1": right_strip_x1, "x2": right_strip_x2, "y1": split_right_y + 1, "y2": big_y2}
-                right_rooms.extend([right_top, right_bottom])
-            else:
-                right_rooms.append({"x1": right_strip_x1, "x2": right_strip_x2, "y1": big_y1, "y2": big_y2})
-
-        top_extra = None
-        if use_dining_split and dining["x2"] - dining["x1"] >= 14:
-            # split on far side from kitchen, keep 6 cells away from common connector zone
-            split_x = dining["x2"] - 6
-            top_extra = {
-                "x1": split_x + 1,
-                "x2": dining["x2"],
-                "y1": dining["y1"],
-                "y2": dining["y2"],
-            }
-            dining["x2"] = split_x - 1
-
+        dining = {"type": "Dining", "x1": kitchen_w + 2, "x2": width - 2, "y1": 1, "y2": kitchen_h}
     else:
-        # mirrored
         kitchen = {"type": "Kitchen", "x1": width - kitchen_w - 1, "x2": width - 2, "y1": 1, "y2": kitchen_h}
-        divider_x = kitchen["x1"] - 1
+        dining = {"type": "Dining", "x1": 1, "x2": kitchen["x1"] - 2, "y1": 1, "y2": kitchen_h}
 
-        dining = {"type": "Dining", "x1": 1, "x2": divider_x - 1, "y1": 1, "y2": kitchen_h}
+    if room_area(kitchen) < 25:
+        return None, "kitchen too small"
+    if dining["x2"] - dining["x1"] + 1 < 7:
+        return None, "dining too small"
 
-        left_x1 = 1
-        left_x2 = divider_x - 1
-        left_y1 = kitchen_h + 2
-        left_y2 = bottom_room_limit
+    # Common
+    lower_y1 = kitchen_h + 3
+    common_margin_x = random.choice([7, 9, 11])
+    common_x1 = common_margin_x
+    common_x2 = width - common_margin_x - 1
+    common_margin_bottom = random.choice([3, 5, 7])
 
-        if left_y2 - left_y1 < 6:
-            return None, "left strip too short"
+    common_y1 = lower_y1
+    common_y2 = height - common_margin_bottom
 
-        split_left_y = random.randint(left_y1 + 2, left_y2 - 3)
+    common = {"type": "Common", "x1": common_x1, "x2": common_x2, "y1": common_y1, "y2": common_y2}
 
-        # big left rectangle becomes common + left strip
-        big_x1 = 1
-        big_x2 = divider_x - 1
-        big_y1 = kitchen_h + 2
-        big_y2 = bottom_room_limit
+    if common["x2"] - common["x1"] + 1 < 9:
+        return None, "common too narrow"
+    if common["y2"] - common["y1"] + 1 < 7:
+        return None, "common too short"
 
-        if big_x2 - big_x1 < 12:
-            return None, "main body too narrow"
-
-        divider2_x = random.randint(big_x1 + 6, big_x2 - 8)
-
-        left_strip_x1 = big_x1
-        left_strip_x2 = divider2_x - 1
-        common = {"type": "Common", "x1": divider2_x + 1, "x2": big_x2, "y1": big_y1, "y2": big_y2}
-
-        left_top = {"x1": left_strip_x1, "x2": left_strip_x2, "y1": big_y1, "y2": split_left_y - 1}
-        left_bottom = {"x1": left_strip_x1, "x2": left_strip_x2, "y1": split_left_y + 1, "y2": big_y2}
-
-        # right of kitchen divider is narrow strip under kitchen
-        right_x1 = divider_x + 1
-        right_x2 = width - 2
-        right_y1 = kitchen_h + 2
-        right_y2 = bottom_room_limit
-
-        right_rooms = []
-        if right_y2 - right_y1 >= 6:
-            split_right_y = random.randint(right_y1 + 2, right_y2 - 3)
-            right_top = {"x1": right_x1, "x2": right_x2, "y1": right_y1, "y2": split_right_y - 1}
-            right_bottom = {"x1": right_x1, "x2": right_x2, "y1": split_right_y + 1, "y2": right_y2}
-            right_rooms.extend([right_top, right_bottom])
-        else:
-            right_rooms.append({"x1": right_x1, "x2": right_x2, "y1": right_y1, "y2": right_y2})
-
-        top_extra = None
-        if use_dining_split and dining["x2"] - dining["x1"] >= 14:
-            split_x = dining["x1"] + 6
-            top_extra = {
-                "x1": dining["x1"],
-                "x2": split_x - 1,
-                "y1": dining["y1"],
-                "y2": dining["y2"],
-            }
-            dining["x1"] = split_x + 1
-
-    # porch
+    # Porch
     porch = None
-    if use_porch:
-        ccx, _ = room_center(common)
-        porch = {"type": "Porch", "x1": ccx - 2, "x2": ccx + 2, "y1": height - 3, "y2": height - 2}
+    if room_area(common) > 140 and random.random() < 0.6:
+        porch_w = random.choice([5, 7])
+        common_cx, _ = room_center(common)
+        porch_x1 = common_cx - porch_w // 2
+        porch_x2 = porch_x1 + porch_w - 1
+        porch_y2 = height - 2
+        porch_y1 = porch_y2 - 2
+        porch = {"type": "Porch", "x1": porch_x1, "x2": porch_x2, "y1": porch_y1, "y2": porch_y2}
 
-    rooms = [kitchen, dining, common, left_top, left_bottom] + right_rooms
-    if top_extra:
-        rooms.append(top_extra)
+        common["y2"] = porch_y1 - 2
+        if common["y2"] - common["y1"] + 1 < 5:
+            porch = None
+            common["y2"] = height - common_margin_bottom
+
+    rooms = [kitchen, dining, common]
+
+    # Left stripe
+    left_x1 = 1
+    left_x2 = common["x1"] - 2
+    if left_x2 - left_x1 + 1 >= 5:
+        left_rooms = partition_vertical_strip(left_x1, left_x2, common["y1"], common["y2"], min_room_h=3, max_room_h=9)
+        rooms.extend(left_rooms)
+
+    # Right stripe
+    right_x1 = common["x2"] + 2
+    right_x2 = width - 2
+    if right_x2 - right_x1 + 1 >= 5:
+        right_rooms = partition_vertical_strip(right_x1, right_x2, common["y1"], common["y2"], min_room_h=3, max_room_h=9)
+        rooms.extend(right_rooms)
+
+    # Bottom stripe
+    bottom_y1 = common["y2"] + 2
+    bottom_y2 = height - 2
+    if porch:
+        bottom_y2 = porch["y1"] - 2
+
+    if bottom_y2 - bottom_y1 + 1 >= 3:
+        bottom_rooms = partition_horizontal_strip(common["x1"], common["x2"], bottom_y1, bottom_y2, min_room_w=5, max_room_w=11)
+        rooms.extend(bottom_rooms)
+
     if porch:
         rooms.append(porch)
 
-    # carve all rooms
+    # Carve rooms
     for room in rooms:
         carve_room(grid, room)
 
-    # connect kitchen -> dining -> common
-    kcx, kcy = room_center(kitchen)
-    dcx, dcy = room_center(dining)
-    ccx, ccy = room_center(common)
+    # Main path: B -> Kitchen -> Dining -> Common -> F
+    kitchen_cx, kitchen_cy = room_center(kitchen)
+    dining_cx, dining_cy = room_center(dining)
+    common_cx, common_cy = room_center(common)
 
-    carve_corridor_L(grid, kcx, kcy, dcx, dcy)
-    carve_corridor_L(grid, dcx, dcy, ccx, common["y1"])
+    carve_corridor_L(grid, kitchen_cx, kitchen_cy, dining_cx, dining_cy)
+    carve_corridor_L(grid, dining_cx, dining_cy, common_cx, common["y1"])
 
-    # dining split extra room -> common
-    if top_extra:
-        ecx, ecy = room_center(top_extra)
-        carve_corridor_L(grid, ecx, ecy, ccx, common["y1"])
+    # Side rooms to common
+    for room in rooms:
+        if room is kitchen or room is dining or room is common or room is porch:
+            continue
 
-    # side rooms -> common
-    side_rooms = [left_top, left_bottom] + right_rooms
-    for room in side_rooms:
-        rcx, rcy = room_center(room)
-        carve_corridor_L(grid, rcx, rcy, ccx, rcy if common["y1"] <= rcy <= common["y2"] else ccy)
+        cx, cy = room_center(room)
 
-    # porch -> common
+        if room["x2"] < common["x1"]:
+            carve_corridor_L(grid, cx, cy, common["x1"], cy)
+        elif room["x1"] > common["x2"]:
+            carve_corridor_L(grid, cx, cy, common["x2"], cy)
+        elif room["y1"] > common["y2"]:
+            carve_corridor_L(grid, cx, cy, cx, common["y2"])
+
+    # Front door
     if porch:
-        pcx, pcy = room_center(porch)
-        carve_corridor_L(grid, pcx, pcy, ccx, common["y2"])
-
-    # front/back doors
-    carve_cell(grid, kcx, 0, "B")
-    start = (kcx, 1)
-
-    if porch:
-        pcx, _ = room_center(porch)
-        carve_cell(grid, pcx, height - 1, "F")
-        end = (pcx, height - 2)
+        porch_cx, porch_cy = room_center(porch)
+        carve_corridor_L(grid, porch_cx, porch_cy, common_cx, common["y2"])
+        carve_cell(grid, porch_cx, height - 1, "F")
+        end = (porch_cx, height - 2)
     else:
-        carve_cell(grid, ccx, height - 1, "F")
-        end = (ccx, height - 2)
+        fx_candidates = [common_cx, common_cx - 2, common_cx + 2]
+        fx_candidates = [x for x in fx_candidates if common["x1"] <= x <= common["x2"] and x != kitchen_cx]
+        if not fx_candidates:
+            fx_candidates = [x for x in range(common["x1"], common["x2"] + 1) if x != kitchen_cx]
+        fx = random.choice(fx_candidates)
+        carve_cell(grid, fx, height - 1, "F")
+        end = (fx, height - 2)
 
-    # labels after geometry
-    labels = {
-        id(kitchen): "Kitchen",
-        id(dining): "Dining",
-        id(common): "Common",
-    }
-    if porch:
-        labels[id(porch)] = "Porch"
+    # Back door
+    carve_cell(grid, kitchen_cx, 0, "B")
+    start = (kitchen_cx, 1)
 
-    candidate_rooms = [left_top, left_bottom] + right_rooms
-    if top_extra:
-        candidate_rooms.append(top_extra)
-
-    labels.update(choose_labels(candidate_rooms, width, height))
-
-    # validate path
-    path = find_path(grid, start, end, width, height)
-    if not path:
-        return None, "no path"
-
-    draw_path(grid, path)
+    labels = assign_final_labels(rooms, width, height)
+    valid, reason = validate_room_sizes(rooms, labels)
+    if not valid:
+        return None, reason
 
     return {
         "grid": grid,
@@ -366,29 +384,9 @@ def build_house_layout(width, height):
         "labels": labels,
         "start": start,
         "end": end,
+        "kitchen_side": kitchen_side,
+        "front_mode": "porch" if porch else "common",
     }, "ok"
-
-
-def try_generate_once(attempt):
-    width = random.choice(odd_choices(MIN_WIDTH, MAX_WIDTH))
-    height = random.choice(odd_choices(MIN_HEIGHT, MAX_HEIGHT))
-
-    print(f"  Attempt {attempt}: size={width}x{height}")
-
-    result, reason = build_house_layout(width, height)
-    if result is None:
-        print(f"    Rejected: {reason}")
-        return None
-
-    return result["grid"], result["rooms"], result["labels"], width, height, attempt
-
-
-def generate_valid_house(max_attempts=100):
-    for attempt in range(1, max_attempts + 1):
-        result = try_generate_once(attempt)
-        if result is not None:
-            return result
-    raise RuntimeError("Failed to generate a valid house")
 
 
 def plot_house(grid, rooms, labels, width, height):
@@ -416,29 +414,25 @@ def plot_house(grid, rooms, labels, width, height):
 
     for y in range(height):
         for x in range(width):
-            if grid[y][x] in {"B", "F"}:
+            if grid[y][x] == "B":
                 ax.text(
-                    x + 0.5,
-                    height - y - 0.5,
-                    grid[y][x],
-                    ha="center",
-                    va="center",
-                    fontsize=14,
-                    fontweight="bold",
+                    x + 0.5, height - y - 0.5, "B",
+                    ha="center", va="center", fontsize=14, fontweight="bold",
+                    bbox=dict(boxstyle="circle,pad=0.25", fc="white", ec="black"),
+                )
+            elif grid[y][x] == "F":
+                ax.text(
+                    x + 0.5, height - y - 0.5, "F",
+                    ha="center", va="center", fontsize=14, fontweight="bold",
                     bbox=dict(boxstyle="circle,pad=0.25", fc="white", ec="black"),
                 )
 
     for room in rooms:
-        label = labels.get(id(room), "")
+        label = labels[id(room)]
         cx, cy = room_center(room)
         ax.text(
-            cx + 0.5,
-            height - cy - 0.5,
-            label,
-            ha="center",
-            va="center",
-            fontsize=9,
-            fontweight="bold",
+            cx + 0.5, height - cy - 0.5, label,
+            ha="center", va="center", fontsize=9, fontweight="bold",
             bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="black", alpha=0.85),
         )
 
@@ -451,6 +445,44 @@ def plot_house(grid, rooms, labels, width, height):
     plt.show()
 
 
+def try_generate_once(attempt):
+    width = random.choice(odd_choices(MIN_WIDTH, MAX_WIDTH))
+    height = random.choice(odd_choices(MIN_HEIGHT, MAX_HEIGHT))
+
+    print(f"  Attempt {attempt}: size={width}x{height}")
+
+    result, reason = build_house_layout(width, height)
+    if result is None:
+        print(f"    Rejected during template build: {reason}")
+        return None
+
+    grid = result["grid"]
+    rooms = result["rooms"]
+    labels = result["labels"]
+    start = result["start"]
+    end = result["end"]
+
+    print(f"    Door mode: {result['front_mode']}")
+    print(f"    Room areas: {[(labels[id(r)], room_area(r)) for r in rooms]}")
+
+    path = find_path(grid, start, end, width, height)
+    if not path:
+        print("    Rejected during path check: no valid B-to-F path")
+        return None
+
+    draw_path(grid, path)
+    print("    Accepted")
+    return grid, rooms, labels, width, height, attempt
+
+
+def generate_valid_house(max_attempts=80):
+    for attempt in range(1, max_attempts + 1):
+        result = try_generate_once(attempt)
+        if result is not None:
+            return result
+    raise RuntimeError(f"Failed to generate a valid house after {max_attempts} attempts")
+
+
 if __name__ == "__main__":
     total_start = time.perf_counter()
     stage_start = total_start
@@ -458,6 +490,9 @@ if __name__ == "__main__":
     print("Generating Layout")
     house, rooms, labels, width, height, attempts = generate_valid_house()
     stage_start = log_stage("Layout complete", stage_start)
+
+    print("Checking Exit Path")
+    stage_start = log_stage("Exit path confirmed", stage_start)
 
     print("Printing ASCII Layout")
     print(f"House size: {width} x {height}")
