@@ -1,23 +1,24 @@
-import math
+import random
 from dataclasses import dataclass, field
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Set, Tuple
+from collections import defaultdict
 
+import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
 
 # ============================================================
-# ROUND 1 GOAL
+# ROUND 2: ZONE-AWARE GRID ROOM GENERATOR
 # ------------------------------------------------------------
-# Build a clean "house program" skeleton:
-# - house footprint
-# - room definitions
-# - zoning (public / private / service)
-# - adjacency rules (preferred / forbidden)
-# - simple plot output
-#
-# This is NOT the final room-growth generator yet.
-# It is the structure we will use for Round 2+.
+# New vs Round 1:
+# - real tile-based room placement
+# - room seeds placed inside zones
+# - rooms grow cell by cell
+# - adjacency preferences influence growth
+# - forbidden adjacency penalized
+# - light aspect-ratio control
+# - garage optional depending on house size
 # ============================================================
 
 
@@ -30,7 +31,7 @@ class RoomSpec:
     name: str
     room_type: str
     zone: str
-    target_area: float
+    target_area: int
     min_aspect: float = 0.5
     max_aspect: float = 2.5
     preferred_adjacent: List[str] = field(default_factory=list)
@@ -38,237 +39,42 @@ class RoomSpec:
 
 
 @dataclass
-class ZoneBlock:
+class ZoneRect:
     name: str
-    x: float
-    y: float
-    w: float
-    h: float
+    x0: int
+    y0: int
+    x1: int  # exclusive
+    y1: int  # exclusive
 
+    @property
+    def width(self) -> int:
+        return self.x1 - self.x0
 
-@dataclass
-class RoomBlock:
-    room: RoomSpec
-    x: float
-    y: float
-    w: float
-    h: float
+    @property
+    def height(self) -> int:
+        return self.y1 - self.y0
 
-
-# ------------------------------------------------------------
-# House program
-# ------------------------------------------------------------
-
-def build_default_program() -> List[RoomSpec]:
-    """
-    Default room list for the first pass.
-    These sizes are target areas in square "units" only.
-    They are not architectural gospel. They are enough to drive structure.
-    """
-
-    rooms = [
-        # PUBLIC ZONE
-        RoomSpec(
-            name="Common",
-            room_type="common",
-            zone="public",
-            target_area=32,
-            preferred_adjacent=["kitchen", "dining", "hall", "entry", "bathroom", "office"],
-            forbidden_adjacent=[]
-        ),
-        RoomSpec(
-            name="Dining",
-            room_type="dining",
-            zone="public",
-            target_area=16,
-            preferred_adjacent=["common", "kitchen"],
-            forbidden_adjacent=["garage"]
-        ),
-        RoomSpec(
-            name="Office",
-            room_type="office",
-            zone="public",
-            target_area=10,
-            preferred_adjacent=["common"],
-            forbidden_adjacent=["garage"]
-        ),
-
-        # SERVICE ZONE
-        RoomSpec(
-            name="Kitchen",
-            room_type="kitchen",
-            zone="service",
-            target_area=18,
-            preferred_adjacent=["dining", "common", "pantry", "garage"],
-            forbidden_adjacent=["bedroom"]
-        ),
-        RoomSpec(
-            name="Pantry",
-            room_type="pantry",
-            zone="service",
-            target_area=6,
-            preferred_adjacent=["kitchen"],
-            forbidden_adjacent=["bedroom"]
-        ),
-        RoomSpec(
-            name="Bathroom",
-            room_type="bathroom",
-            zone="service",
-            target_area=8,
-            preferred_adjacent=["common", "bedroom", "hall"],
-            forbidden_adjacent=["dining"]
-        ),
-        RoomSpec(
-            name="Garage",
-            room_type="garage",
-            zone="service",
-            target_area=24,
-            preferred_adjacent=["kitchen", "hall", "entry"],
-            forbidden_adjacent=["bedroom", "dining"]
-        ),
-
-        # PRIVATE ZONE
-        RoomSpec(
-            name="Bedroom 1",
-            room_type="bedroom",
-            zone="private",
-            target_area=18,
-            preferred_adjacent=["bathroom", "hall", "bedroom"],
-            forbidden_adjacent=["garage", "kitchen"]
-        ),
-        RoomSpec(
-            name="Bedroom 2",
-            room_type="bedroom",
-            zone="private",
-            target_area=16,
-            preferred_adjacent=["bathroom", "hall", "bedroom"],
-            forbidden_adjacent=["garage", "kitchen"]
-        ),
-    ]
-    return rooms
+    @property
+    def area(self) -> int:
+        return self.width * self.height
 
 
 # ------------------------------------------------------------
-# Zone logic
+# Utility helpers
 # ------------------------------------------------------------
 
-def zone_area_totals(rooms: List[RoomSpec]) -> Dict[str, float]:
-    totals: Dict[str, float] = {"public": 0.0, "private": 0.0, "service": 0.0}
-    for room in rooms:
-        totals[room.zone] += room.target_area
-    return totals
+DIR4 = [(1, 0), (-1, 0), (0, 1), (0, -1)]
 
 
-def split_house_into_zones(
-    house_w: float,
-    house_h: float,
-    zone_totals: Dict[str, float]
-) -> Dict[str, ZoneBlock]:
-    """
-    Simple zone-first layout, inspired by the papers:
-    - public near entry/front
-    - private away from entry
-    - service near public
-
-    Assumption for this first pass:
-    - front of house is along y = 0
-    - public zone sits across the front band
-    - remaining rear area gets split into private and service
-    """
-
-    total = sum(zone_totals.values())
-    if total <= 0:
-        raise ValueError("Total zone area must be > 0.")
-
-    public_ratio = zone_totals["public"] / total
-    private_ratio = zone_totals["private"] / total
-    service_ratio = zone_totals["service"] / total
-
-    # Public is a front strip.
-    public_h = house_h * public_ratio
-    public_h = max(house_h * 0.22, min(public_h, house_h * 0.45))
-
-    rear_h = house_h - public_h
-    rear_total = private_ratio + service_ratio
-    if rear_total <= 0:
-        rear_total = 1.0
-
-    private_w = house_w * (private_ratio / rear_total)
-    private_w = max(house_w * 0.35, min(private_w, house_w * 0.70))
-    service_w = house_w - private_w
-
-    zones = {
-        "public": ZoneBlock("public", 0.0, 0.0, house_w, public_h),
-        "private": ZoneBlock("private", 0.0, public_h, private_w, rear_h),
-        "service": ZoneBlock("service", private_w, public_h, service_w, rear_h),
-    }
-    return zones
+def neighbors4(x: int, y: int, w: int, h: int):
+    for dx, dy in DIR4:
+        nx, ny = x + dx, y + dy
+        if 0 <= nx < w and 0 <= ny < h:
+            yield nx, ny
 
 
-# ------------------------------------------------------------
-# Placeholder room layout inside each zone
-# ------------------------------------------------------------
-
-def pack_rooms_in_zone(zone: ZoneBlock, rooms: List[RoomSpec]) -> List[RoomBlock]:
-    """
-    Placeholder packing ONLY for Round 1.
-    We slice the zone into strips so you can inspect:
-    - room membership
-    - room relative size
-    - zone groupings
-
-    Round 2 will replace this with actual room placement logic.
-    """
-
-    if not rooms:
-        return []
-
-    total_area = sum(r.target_area for r in rooms)
-    room_blocks: List[RoomBlock] = []
-
-    # Sort biggest first for cleaner plotting
-    rooms_sorted = sorted(rooms, key=lambda r: r.target_area, reverse=True)
-
-    horizontal = zone.w >= zone.h
-
-    if horizontal:
-        # Slice vertically across width
-        cursor_x = zone.x
-        for i, room in enumerate(rooms_sorted):
-            frac = room.target_area / total_area
-            width = zone.w * frac if i < len(rooms_sorted) - 1 else (zone.x + zone.w - cursor_x)
-            room_blocks.append(RoomBlock(room, cursor_x, zone.y, width, zone.h))
-            cursor_x += width
-    else:
-        # Slice horizontally across height
-        cursor_y = zone.y
-        for i, room in enumerate(rooms_sorted):
-            frac = room.target_area / total_area
-            height = zone.h * frac if i < len(rooms_sorted) - 1 else (zone.y + zone.h - cursor_y)
-            room_blocks.append(RoomBlock(room, zone.x, cursor_y, zone.w, height))
-            cursor_y += height
-
-    return room_blocks
-
-
-# ------------------------------------------------------------
-# Adjacency reporting
-# ------------------------------------------------------------
-
-def build_adjacency_summary(rooms: List[RoomSpec]) -> List[str]:
-    lines = []
-    for room in rooms:
-        pref = ", ".join(room.preferred_adjacent) if room.preferred_adjacent else "-"
-        forb = ", ".join(room.forbidden_adjacent) if room.forbidden_adjacent else "-"
-        lines.append(
-            f"{room.name:10s} | zone={room.zone:7s} | area={room.target_area:>5.1f} | "
-            f"prefer=[{pref}] | avoid=[{forb}]"
-        )
-    return lines
-
-
-def build_room_type_color(room_type: str) -> str:
-    color_map = {
+def room_color(room_type: str) -> str:
+    cmap = {
         "common": "#d9ead3",
         "dining": "#fff2cc",
         "office": "#cfe2f3",
@@ -277,158 +83,641 @@ def build_room_type_color(room_type: str) -> str:
         "bathroom": "#d9d2e9",
         "garage": "#d0d0d0",
         "bedroom": "#ead1dc",
-        "hall": "#eeeeee",
-        "entry": "#ffe599",
     }
-    return color_map.get(room_type, "#ffffff")
+    return cmap.get(room_type, "#ffffff")
+
+
+# ------------------------------------------------------------
+# Program definition
+# ------------------------------------------------------------
+
+def build_program(house_w: int, house_h: int, rng: random.Random) -> List[RoomSpec]:
+    """
+    Build a default house program.
+    Garage is optional and more likely for larger houses.
+    """
+
+    house_area = house_w * house_h
+
+    rooms = [
+        # PUBLIC
+        RoomSpec(
+            name="Common",
+            room_type="common",
+            zone="public",
+            target_area=max(18, round(house_area * 0.18)),
+            preferred_adjacent=["dining", "kitchen", "office", "bathroom"],
+            forbidden_adjacent=[]
+        ),
+        RoomSpec(
+            name="Dining",
+            room_type="dining",
+            zone="public",
+            target_area=max(10, round(house_area * 0.09)),
+            preferred_adjacent=["common", "kitchen"],
+            forbidden_adjacent=["garage"]
+        ),
+        RoomSpec(
+            name="Office",
+            room_type="office",
+            zone="public",
+            target_area=max(6, round(house_area * 0.05)),
+            preferred_adjacent=["common"],
+            forbidden_adjacent=["garage"]
+        ),
+
+        # SERVICE
+        RoomSpec(
+            name="Kitchen",
+            room_type="kitchen",
+            zone="service",
+            target_area=max(10, round(house_area * 0.10)),
+            preferred_adjacent=["common", "dining", "pantry", "garage"],
+            forbidden_adjacent=["bedroom"]
+        ),
+        RoomSpec(
+            name="Pantry",
+            room_type="pantry",
+            zone="service",
+            target_area=max(4, round(house_area * 0.03)),
+            preferred_adjacent=["kitchen"],
+            forbidden_adjacent=["bedroom"]
+        ),
+        RoomSpec(
+            name="Bathroom",
+            room_type="bathroom",
+            zone="service",
+            target_area=max(5, round(house_area * 0.05)),
+            preferred_adjacent=["bedroom", "common"],
+            forbidden_adjacent=["dining"]
+        ),
+
+        # PRIVATE
+        RoomSpec(
+            name="Bedroom 1",
+            room_type="bedroom",
+            zone="private",
+            target_area=max(10, round(house_area * 0.10)),
+            preferred_adjacent=["bedroom", "bathroom"],
+            forbidden_adjacent=["garage", "kitchen"]
+        ),
+        RoomSpec(
+            name="Bedroom 2",
+            room_type="bedroom",
+            zone="private",
+            target_area=max(9, round(house_area * 0.09)),
+            preferred_adjacent=["bedroom", "bathroom"],
+            forbidden_adjacent=["garage", "kitchen"]
+        ),
+    ]
+
+    # Optional third bedroom for bigger houses
+    if house_area >= 220 and rng.random() < 0.65:
+        rooms.append(
+            RoomSpec(
+                name="Bedroom 3",
+                room_type="bedroom",
+                zone="private",
+                target_area=max(8, round(house_area * 0.08)),
+                preferred_adjacent=["bedroom", "bathroom"],
+                forbidden_adjacent=["garage", "kitchen"]
+            )
+        )
+
+    # Garage optional, more likely for larger houses
+    garage_probability = 0.15
+    if house_area >= 180:
+        garage_probability = 0.45
+    if house_area >= 240:
+        garage_probability = 0.70
+
+    if rng.random() < garage_probability:
+        rooms.append(
+            RoomSpec(
+                name="Garage",
+                room_type="garage",
+                zone="service",
+                target_area=max(14, round(house_area * 0.12)),
+                preferred_adjacent=["kitchen", "common"],
+                forbidden_adjacent=["bedroom", "dining"]
+            )
+        )
+
+    return rooms
+
+
+# ------------------------------------------------------------
+# Zone split
+# ------------------------------------------------------------
+
+def zone_totals(rooms: List[RoomSpec]) -> Dict[str, int]:
+    totals = {"public": 0, "private": 0, "service": 0}
+    for r in rooms:
+        totals[r.zone] += r.target_area
+    return totals
+
+
+def split_zones(house_w: int, house_h: int, totals: Dict[str, int]) -> Dict[str, ZoneRect]:
+    """
+    Front band = public
+    Rear split = private (left) + service (right)
+    """
+    total = sum(totals.values())
+    public_ratio = totals["public"] / total if total else 0.3
+
+    public_h = max(4, min(round(house_h * public_ratio), max(4, house_h // 2)))
+    public_h = min(public_h, house_h - 4)
+
+    rear_h = house_h - public_h
+
+    rear_total = totals["private"] + totals["service"]
+    if rear_total == 0:
+        private_w = house_w // 2
+    else:
+        private_w = round(house_w * (totals["private"] / rear_total))
+        private_w = max(4, min(private_w, house_w - 4))
+
+    zones = {
+        "public": ZoneRect("public", 0, 0, house_w, public_h),
+        "private": ZoneRect("private", 0, public_h, private_w, house_h),
+        "service": ZoneRect("service", private_w, public_h, house_w, house_h),
+    }
+    return zones
+
+
+# ------------------------------------------------------------
+# Layout state
+# ------------------------------------------------------------
+
+class Layout:
+    def __init__(self, house_w: int, house_h: int, rooms: List[RoomSpec], zones: Dict[str, ZoneRect], seed: int):
+        self.w = house_w
+        self.h = house_h
+        self.rooms = rooms
+        self.zones = zones
+        self.rng = random.Random(seed)
+
+        self.grid = np.full((self.w, self.h), -1, dtype=int)
+        self.room_cells: Dict[int, Set[Tuple[int, int]]] = {i: set() for i in range(len(rooms))}
+        self.room_seeds: Dict[int, Tuple[int, int]] = {}
+
+        # Zone mask
+        self.zone_map = np.empty((self.w, self.h), dtype=object)
+        for zname, z in zones.items():
+            for x in range(z.x0, z.x1):
+                for y in range(z.y0, z.y1):
+                    self.zone_map[x, y] = zname
+
+    def room_bbox(self, rid: int) -> Optional[Tuple[int, int, int, int]]:
+        cells = self.room_cells[rid]
+        if not cells:
+            return None
+        xs = [c[0] for c in cells]
+        ys = [c[1] for c in cells]
+        return min(xs), min(ys), max(xs), max(ys)
+
+    def room_aspect(self, rid: int) -> float:
+        bbox = self.room_bbox(rid)
+        if bbox is None:
+            return 1.0
+        x0, y0, x1, y1 = bbox
+        bw = x1 - x0 + 1
+        bh = y1 - y0 + 1
+        return max(bw / bh, bh / bw)
+
+    def zone_cells(self, zone_name: str) -> List[Tuple[int, int]]:
+        z = self.zones[zone_name]
+        return [(x, y) for x in range(z.x0, z.x1) for y in range(z.y0, z.y1)]
+
+    def room_frontier(self, rid: int) -> Set[Tuple[int, int]]:
+        frontier = set()
+        zone_name = self.rooms[rid].zone
+
+        for x, y in self.room_cells[rid]:
+            for nx, ny in neighbors4(x, y, self.w, self.h):
+                if self.grid[nx, ny] == -1 and self.zone_map[nx, ny] == zone_name:
+                    frontier.add((nx, ny))
+        return frontier
+
+    def neighboring_room_types(self, x: int, y: int) -> List[str]:
+        types = []
+        for nx, ny in neighbors4(x, y, self.w, self.h):
+            rid = self.grid[nx, ny]
+            if rid != -1:
+                types.append(self.rooms[rid].room_type)
+        return types
+
+    def neighboring_room_ids(self, x: int, y: int) -> Set[int]:
+        out = set()
+        for nx, ny in neighbors4(x, y, self.w, self.h):
+            rid = self.grid[nx, ny]
+            if rid != -1:
+                out.add(rid)
+        return out
+
+
+# ------------------------------------------------------------
+# Seed placement
+# ------------------------------------------------------------
+
+def pick_seed_for_room(layout: Layout, rid: int):
+    room = layout.rooms[rid]
+    zone = layout.zones[room.zone]
+    best_score = -1e9
+    best_cell = None
+
+    for x in range(zone.x0, zone.x1):
+        for y in range(zone.y0, zone.y1):
+            if layout.grid[x, y] != -1:
+                continue
+
+            score = 0.0
+
+            # Bias based on zone semantics
+            if room.zone == "public":
+                # near front
+                score -= y * 1.2
+            elif room.zone == "private":
+                # farther back
+                score += y * 0.8
+            elif room.zone == "service":
+                # near right side / edge
+                score += x * 0.7
+
+            # Garage toward front-right if present
+            if room.room_type == "garage":
+                score += x * 2.0
+                score -= y * 1.0
+
+            # Kitchen prefers being somewhat close to public boundary
+            if room.room_type == "kitchen":
+                score -= abs(y - zone.y0) * 0.6
+
+            # Bedroom prefers farther from front
+            if room.room_type == "bedroom":
+                score += y * 0.8
+
+            # Attraction to preferred rooms already seeded
+            for other_rid, (ox, oy) in layout.room_seeds.items():
+                other_type = layout.rooms[other_rid].room_type
+                dist = abs(x - ox) + abs(y - oy)
+
+                if other_type in room.preferred_adjacent:
+                    score += max(0, 10 - dist) * 1.8
+
+                if other_type in room.forbidden_adjacent:
+                    score -= max(0, 10 - dist) * 2.2
+
+            score += layout.rng.uniform(-0.2, 0.2)
+
+            if score > best_score:
+                best_score = score
+                best_cell = (x, y)
+
+    if best_cell is None:
+        raise RuntimeError(f"Could not place seed for room {room.name}")
+
+    layout.room_seeds[rid] = best_cell
+    layout.room_cells[rid].add(best_cell)
+    layout.grid[best_cell] = rid
+
+
+def place_all_seeds(layout: Layout):
+    # Bigger rooms first
+    order = sorted(range(len(layout.rooms)), key=lambda i: layout.rooms[i].target_area, reverse=True)
+    for rid in order:
+        pick_seed_for_room(layout, rid)
+
+
+# ------------------------------------------------------------
+# Room growth
+# ------------------------------------------------------------
+
+def candidate_score(layout: Layout, rid: int, cell: Tuple[int, int]) -> float:
+    x, y = cell
+    room = layout.rooms[rid]
+    score = 0.0
+
+    # Must touch current room somehow
+    own_contacts = 0
+    preferred_contacts = 0
+    forbidden_contacts = 0
+    neutral_contacts = 0
+
+    for nx, ny in neighbors4(x, y, layout.w, layout.h):
+        oid = layout.grid[nx, ny]
+        if oid == rid:
+            own_contacts += 1
+        elif oid != -1:
+            other_type = layout.rooms[oid].room_type
+            if other_type in room.preferred_adjacent:
+                preferred_contacts += 1
+            elif other_type in room.forbidden_adjacent:
+                forbidden_contacts += 1
+            else:
+                neutral_contacts += 1
+
+    score += own_contacts * 2.5
+    score += preferred_contacts * 2.0
+    score -= forbidden_contacts * 3.5
+    score -= neutral_contacts * 0.2
+
+    # Compactness / aspect control
+    current_aspect = layout.room_aspect(rid)
+
+    # Predict aspect if cell added
+    old_cells = layout.room_cells[rid]
+    xs = [c[0] for c in old_cells] + [x]
+    ys = [c[1] for c in old_cells] + [y]
+    bw = max(xs) - min(xs) + 1
+    bh = max(ys) - min(ys) + 1
+    new_aspect = max(bw / bh, bh / bw)
+
+    score -= max(0.0, new_aspect - 2.2) * 3.0
+    score -= max(0.0, new_aspect - current_aspect) * 0.6
+
+    # Type-specific nudges
+    if room.room_type == "garage":
+        # wants front and right-ish
+        score += x * 0.4
+        score -= y * 0.6
+
+    if room.room_type == "bedroom":
+        # prefers back-ish
+        score += y * 0.35
+
+    if room.room_type == "common":
+        # prefers width / openness
+        score -= max(0.0, new_aspect - 1.8) * 0.6
+
+    if room.room_type == "bathroom":
+        # tries to avoid becoming a noodle
+        score -= max(0.0, new_aspect - 1.8) * 2.0
+
+    if room.room_type == "pantry":
+        # pantry can be a bit more flexible
+        score -= max(0.0, new_aspect - 3.0) * 0.4
+
+    score += layout.rng.uniform(-0.15, 0.15)
+    return score
+
+
+def grow_rooms(layout: Layout, max_passes: int = 5000):
+    room_ids = list(range(len(layout.rooms)))
+
+    for _ in range(max_passes):
+        incomplete = [rid for rid in room_ids if len(layout.room_cells[rid]) < layout.rooms[rid].target_area]
+        if not incomplete:
+            break
+
+        layout.rng.shuffle(incomplete)
+        progressed = False
+
+        for rid in incomplete:
+            frontier = list(layout.room_frontier(rid))
+            if not frontier:
+                continue
+
+            frontier.sort(key=lambda c: candidate_score(layout, rid, c), reverse=True)
+            chosen = frontier[0]
+
+            layout.grid[chosen] = rid
+            layout.room_cells[rid].add(chosen)
+            progressed = True
+
+        if not progressed:
+            break
+
+
+# ------------------------------------------------------------
+# Fill leftover zone holes
+# ------------------------------------------------------------
+
+def fill_unassigned(layout: Layout):
+    for zone_name, z in layout.zones.items():
+        changed = True
+        while changed:
+            changed = False
+            for x in range(z.x0, z.x1):
+                for y in range(z.y0, z.y1):
+                    if layout.grid[x, y] != -1:
+                        continue
+
+                    boundary = defaultdict(int)
+                    for nx, ny in neighbors4(x, y, layout.w, layout.h):
+                        rid = layout.grid[nx, ny]
+                        if rid != -1 and layout.rooms[rid].zone == zone_name:
+                            boundary[rid] += 1
+
+                    if boundary:
+                        best_rid = max(boundary, key=boundary.get)
+                        layout.grid[x, y] = best_rid
+                        layout.room_cells[best_rid].add((x, y))
+                        changed = True
+
+
+# ------------------------------------------------------------
+# Scoring
+# ------------------------------------------------------------
+
+def adjacency_report(layout: Layout) -> Dict[str, Set[str]]:
+    report = {r.name: set() for r in layout.rooms}
+    for x in range(layout.w):
+        for y in range(layout.h):
+            rid = layout.grid[x, y]
+            if rid == -1:
+                continue
+            for nx, ny in neighbors4(x, y, layout.w, layout.h):
+                orid = layout.grid[nx, ny]
+                if orid != -1 and orid != rid:
+                    report[layout.rooms[rid].name].add(layout.rooms[orid].name)
+    return report
+
+
+def score_layout(layout: Layout) -> Tuple[float, Dict[str, float]]:
+    score = 0.0
+    details = {}
+
+    # 1. Adjacency score
+    adj_score = 0.0
+    for rid, room in enumerate(layout.rooms):
+        touching_types = set()
+        for x, y in layout.room_cells[rid]:
+            for nx, ny in neighbors4(x, y, layout.w, layout.h):
+                orid = layout.grid[nx, ny]
+                if orid != -1 and orid != rid:
+                    touching_types.add(layout.rooms[orid].room_type)
+
+        for t in room.preferred_adjacent:
+            if t in touching_types:
+                adj_score += 6.0
+
+        for t in room.forbidden_adjacent:
+            if t in touching_types:
+                adj_score -= 10.0
+
+    # 2. Aspect score
+    aspect_score = 0.0
+    for rid, room in enumerate(layout.rooms):
+        aspect = layout.room_aspect(rid)
+
+        if aspect <= room.max_aspect:
+            aspect_score += 3.0
+        else:
+            aspect_score -= (aspect - room.max_aspect) * 8.0
+
+        if room.room_type in ("bathroom", "office") and aspect > 2.6:
+            aspect_score -= 8.0
+
+    # 3. Zone fit / semantics
+    semantic_score = 0.0
+    for rid, room in enumerate(layout.rooms):
+        bbox = layout.room_bbox(rid)
+        if bbox is None:
+            continue
+        x0, y0, x1, y1 = bbox
+        cx = (x0 + x1) / 2
+        cy = (y0 + y1) / 2
+
+        if room.room_type == "bedroom":
+            semantic_score += cy * 0.6
+        if room.room_type == "garage":
+            semantic_score += cx * 0.8 - cy * 0.8
+        if room.room_type == "common":
+            semantic_score += max(0, 6 - cy) * 1.2
+
+    score = adj_score + aspect_score + semantic_score
+    details["adjacency"] = adj_score
+    details["aspect"] = aspect_score
+    details["semantic"] = semantic_score
+    details["total"] = score
+    return score, details
 
 
 # ------------------------------------------------------------
 # Plotting
 # ------------------------------------------------------------
 
-def plot_round1(
-    house_w: float,
-    house_h: float,
-    zones: Dict[str, ZoneBlock],
-    room_blocks: List[RoomBlock],
-    show_zone_labels: bool = True
-) -> None:
+def plot_layout(layout: Layout, title: str):
     fig, ax = plt.subplots(figsize=(12, 8))
 
-    # Outer house
-    ax.add_patch(
-        Rectangle((0, 0), house_w, house_h, fill=False, linewidth=3)
-    )
-
     # Zone outlines
-    zone_styles = {
-        "public": {"linestyle": "--", "linewidth": 2},
-        "private": {"linestyle": "--", "linewidth": 2},
-        "service": {"linestyle": "--", "linewidth": 2},
-    }
-
-    for zone_name, zone in zones.items():
-        ax.add_patch(
-            Rectangle(
-                (zone.x, zone.y),
-                zone.w,
-                zone.h,
-                fill=False,
-                edgecolor="black",
-                linestyle=zone_styles[zone_name]["linestyle"],
-                linewidth=zone_styles[zone_name]["linewidth"],
-            )
-        )
-        if show_zone_labels:
-            ax.text(
-                zone.x + zone.w / 2,
-                zone.y + zone.h / 2,
-                zone.name.upper(),
-                ha="center",
-                va="center",
-                fontsize=16,
-                alpha=0.25,
-                weight="bold",
-            )
-
-    # Room placeholder blocks
-    for rb in room_blocks:
-        color = build_room_type_color(rb.room.room_type)
-        ax.add_patch(
-            Rectangle(
-                (rb.x, rb.y),
-                rb.w,
-                rb.h,
-                facecolor=color,
-                edgecolor="black",
-                linewidth=1.5,
-                alpha=0.95,
-            )
-        )
-
-        aspect = max(rb.w / max(rb.h, 1e-6), rb.h / max(rb.w, 1e-6))
+    for zname, z in layout.zones.items():
+        ax.add_patch(Rectangle((z.x0, z.y0), z.width, z.height, fill=False, linestyle="--", linewidth=2))
         ax.text(
-            rb.x + rb.w / 2,
-            rb.y + rb.h / 2,
-            f"{rb.room.name}\n{rb.room.room_type}\nA={rb.room.target_area:.0f}\nAR={aspect:.2f}",
+            z.x0 + z.width / 2,
+            z.y0 + z.height / 2,
+            zname.upper(),
+            ha="center",
+            va="center",
+            fontsize=18,
+            alpha=0.15,
+            weight="bold",
+        )
+
+    # Cells
+    for x in range(layout.w):
+        for y in range(layout.h):
+            rid = layout.grid[x, y]
+            if rid != -1:
+                ax.add_patch(
+                    Rectangle((x, y), 1, 1,
+                              facecolor=room_color(layout.rooms[rid].room_type),
+                              edgecolor="black",
+                              linewidth=0.8)
+                )
+
+    # Labels
+    for rid, room in enumerate(layout.rooms):
+        cells = list(layout.room_cells[rid])
+        if not cells:
+            continue
+        cx = sum(c[0] + 0.5 for c in cells) / len(cells)
+        cy = sum(c[1] + 0.5 for c in cells) / len(cells)
+        aspect = layout.room_aspect(rid)
+        ax.text(
+            cx, cy,
+            f"{room.name}\n{room.room_type}\nA={len(cells)}\nAR={aspect:.2f}",
             ha="center",
             va="center",
             fontsize=9,
-            bbox=dict(facecolor="white", alpha=0.65, edgecolor="none", pad=1.5),
+            bbox=dict(facecolor="white", alpha=0.7, edgecolor="none", pad=1.5)
         )
 
-    # Entry marker on front wall, centered on public zone
-    public_zone = zones["public"]
-    entry_x = public_zone.x + public_zone.w * 0.5
-    entry_w = min(2.0, house_w * 0.08)
-    ax.add_patch(
-        Rectangle(
-            (entry_x - entry_w / 2, -0.15),
-            entry_w,
-            0.3,
-            facecolor="white",
-            edgecolor="black",
-            linewidth=2,
-        )
-    )
-    ax.text(entry_x, -0.7, "ENTRY", ha="center", va="center", fontsize=10)
+    # Entry marker at front center
+    entry_x = layout.w / 2 - 0.5
+    ax.add_patch(Rectangle((entry_x, -0.15), 1.0, 0.3, facecolor="white", edgecolor="black", linewidth=2))
+    ax.text(layout.w / 2, -0.8, "ENTRY", ha="center", va="center", fontsize=10)
 
-    ax.set_xlim(-1, house_w + 1)
-    ax.set_ylim(-1.5, house_h + 1)
+    ax.set_xlim(-1, layout.w + 1)
+    ax.set_ylim(-1.5, layout.h + 1)
     ax.set_aspect("equal")
-    ax.set_title("Round 1: House Program Skeleton (Zones + Placeholder Rooms)")
-    ax.grid(True, alpha=0.25)
+    ax.set_xticks(range(layout.w + 1))
+    ax.set_yticks(range(layout.h + 1))
+    ax.grid(True, alpha=0.20)
+    ax.set_title(title)
     plt.tight_layout()
     plt.show()
 
 
 # ------------------------------------------------------------
-# Main runner
+# Runner
 # ------------------------------------------------------------
 
-def main():
-    # House footprint
-    house_w = 16.0
-    house_h = 12.0
+def generate_best_layout(house_w: int = 18, house_h: int = 12, trials: int = 40, base_seed: int = 42):
+    best_layout = None
+    best_score = -1e18
+    best_details = None
 
-    # Room program
-    rooms = build_default_program()
+    for t in range(trials):
+        seed = base_seed + t
+        rng = random.Random(seed)
 
-    # Zone totals + split
-    totals = zone_area_totals(rooms)
-    zones = split_house_into_zones(house_w, house_h, totals)
+        rooms = build_program(house_w, house_h, rng)
+        totals = zone_totals(rooms)
+        zones = split_zones(house_w, house_h, totals)
 
-    # Placeholder packing inside zones
-    all_blocks: List[RoomBlock] = []
-    for zone_name in ("public", "private", "service"):
-        zone_rooms = [r for r in rooms if r.zone == zone_name]
-        all_blocks.extend(pack_rooms_in_zone(zones[zone_name], zone_rooms))
+        layout = Layout(house_w, house_h, rooms, zones, seed=seed)
+        place_all_seeds(layout)
+        grow_rooms(layout)
+        fill_unassigned(layout)
 
-    # Console output
-    print("\n=== HOUSE FOOTPRINT ===")
-    print(f"Width: {house_w:.1f}")
-    print(f"Height: {house_h:.1f}")
-    print(f"Area: {house_w * house_h:.1f}")
+        score, details = score_layout(layout)
+        if score > best_score:
+            best_score = score
+            best_layout = layout
+            best_details = details
 
-    print("\n=== ZONE TOTALS ===")
-    for k, v in totals.items():
-        print(f"{k:7s}: {v:.1f}")
+    return best_layout, best_score, best_details
 
-    print("\n=== ROOM PROGRAM ===")
-    for line in build_adjacency_summary(rooms):
-        print(line)
 
-    print("\n=== ZONE BLOCKS ===")
-    for name, z in zones.items():
+def print_summary(layout: Layout, score: float, details: Dict[str, float]):
+    print("\n=== BEST LAYOUT SUMMARY ===")
+    print(f"House size: {layout.w} x {layout.h} = {layout.w * layout.h}")
+    print(f"Score: {score:.2f}")
+    for k, v in details.items():
+        print(f"  {k:10s}: {v:.2f}")
+
+    print("\n=== ROOM LIST ===")
+    for rid, room in enumerate(layout.rooms):
         print(
-            f"{name:7s} -> x={z.x:.2f}, y={z.y:.2f}, w={z.w:.2f}, h={z.h:.2f}, "
-            f"area={z.w * z.h:.2f}"
+            f"{room.name:10s} | type={room.room_type:8s} | zone={room.zone:7s} | "
+            f"target={room.target_area:3d} | actual={len(layout.room_cells[rid]):3d} | "
+            f"aspect={layout.room_aspect(rid):.2f}"
         )
 
-    # Plot
-    plot_round1(house_w, house_h, zones, all_blocks)
+    print("\n=== ADJACENCY REPORT ===")
+    report = adjacency_report(layout)
+    for room_name, neighbors in report.items():
+        print(f"{room_name:10s}: {sorted(neighbors)}")
 
 
 if __name__ == "__main__":
-    main()
+    layout, score, details = generate_best_layout(
+        house_w=18,   # tweak this later
+        house_h=12,
+        trials=50,
+        base_seed=100
+    )
+    print_summary(layout, score, details)
+    plot_layout(layout, title=f"Round 2: Zone-Aware Grid Layout | score={score:.1f}")
