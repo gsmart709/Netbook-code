@@ -1,7 +1,7 @@
 import random
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
-from collections import defaultdict
+from collections import defaultdict, deque
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -9,16 +9,18 @@ from matplotlib.patches import Rectangle
 
 
 # ============================================================
-# ROUND 2: ZONE-AWARE GRID ROOM GENERATOR
+# ROUND 3: ZONE-AWARE GRID LAYOUT + CONNECTIVITY + DOORS
 # ------------------------------------------------------------
-# New vs Round 1:
+# Features:
 # - real tile-based room placement
-# - room seeds placed inside zones
-# - rooms grow cell by cell
-# - adjacency preferences influence growth
-# - forbidden adjacency penalized
-# - light aspect-ratio control
-# - garage optional depending on house size
+# - rooms placed inside zones
+# - room seeds + growth
+# - preferred / forbidden adjacency scoring
+# - aspect ratio control
+# - semantic scoring
+# - connectivity scoring from entry
+# - door detection between rooms
+# - best-of-N layout search
 # ============================================================
 
 
@@ -96,7 +98,6 @@ def build_program(house_w: int, house_h: int, rng: random.Random) -> List[RoomSp
     Build a default house program.
     Garage is optional and more likely for larger houses.
     """
-
     house_area = house_w * house_h
 
     rooms = [
@@ -171,7 +172,6 @@ def build_program(house_w: int, house_h: int, rng: random.Random) -> List[RoomSp
         ),
     ]
 
-    # Optional third bedroom for bigger houses
     if house_area >= 220 and rng.random() < 0.65:
         rooms.append(
             RoomSpec(
@@ -184,7 +184,6 @@ def build_program(house_w: int, house_h: int, rng: random.Random) -> List[RoomSp
             )
         )
 
-    # Garage optional, more likely for larger houses
     garage_probability = 0.15
     if house_area >= 180:
         garage_probability = 0.45
@@ -228,8 +227,6 @@ def split_zones(house_w: int, house_h: int, totals: Dict[str, int]) -> Dict[str,
     public_h = max(4, min(round(house_h * public_ratio), max(4, house_h // 2)))
     public_h = min(public_h, house_h - 4)
 
-    rear_h = house_h - public_h
-
     rear_total = totals["private"] + totals["service"]
     if rear_total == 0:
         private_w = house_w // 2
@@ -261,7 +258,6 @@ class Layout:
         self.room_cells: Dict[int, Set[Tuple[int, int]]] = {i: set() for i in range(len(rooms))}
         self.room_seeds: Dict[int, Tuple[int, int]] = {}
 
-        # Zone mask
         self.zone_map = np.empty((self.w, self.h), dtype=object)
         for zname, z in zones.items():
             for x in range(z.x0, z.x1):
@@ -285,10 +281,6 @@ class Layout:
         bh = y1 - y0 + 1
         return max(bw / bh, bh / bw)
 
-    def zone_cells(self, zone_name: str) -> List[Tuple[int, int]]:
-        z = self.zones[zone_name]
-        return [(x, y) for x in range(z.x0, z.x1) for y in range(z.y0, z.y1)]
-
     def room_frontier(self, rid: int) -> Set[Tuple[int, int]]:
         frontier = set()
         zone_name = self.rooms[rid].zone
@@ -298,22 +290,6 @@ class Layout:
                 if self.grid[nx, ny] == -1 and self.zone_map[nx, ny] == zone_name:
                     frontier.add((nx, ny))
         return frontier
-
-    def neighboring_room_types(self, x: int, y: int) -> List[str]:
-        types = []
-        for nx, ny in neighbors4(x, y, self.w, self.h):
-            rid = self.grid[nx, ny]
-            if rid != -1:
-                types.append(self.rooms[rid].room_type)
-        return types
-
-    def neighboring_room_ids(self, x: int, y: int) -> Set[int]:
-        out = set()
-        for nx, ny in neighbors4(x, y, self.w, self.h):
-            rid = self.grid[nx, ny]
-            if rid != -1:
-                out.add(rid)
-        return out
 
 
 # ------------------------------------------------------------
@@ -333,31 +309,23 @@ def pick_seed_for_room(layout: Layout, rid: int):
 
             score = 0.0
 
-            # Bias based on zone semantics
             if room.zone == "public":
-                # near front
                 score -= y * 1.2
             elif room.zone == "private":
-                # farther back
                 score += y * 0.8
             elif room.zone == "service":
-                # near right side / edge
                 score += x * 0.7
 
-            # Garage toward front-right if present
             if room.room_type == "garage":
                 score += x * 2.0
                 score -= y * 1.0
 
-            # Kitchen prefers being somewhat close to public boundary
             if room.room_type == "kitchen":
                 score -= abs(y - zone.y0) * 0.6
 
-            # Bedroom prefers farther from front
             if room.room_type == "bedroom":
                 score += y * 0.8
 
-            # Attraction to preferred rooms already seeded
             for other_rid, (ox, oy) in layout.room_seeds.items():
                 other_type = layout.rooms[other_rid].room_type
                 dist = abs(x - ox) + abs(y - oy)
@@ -383,7 +351,6 @@ def pick_seed_for_room(layout: Layout, rid: int):
 
 
 def place_all_seeds(layout: Layout):
-    # Bigger rooms first
     order = sorted(range(len(layout.rooms)), key=lambda i: layout.rooms[i].target_area, reverse=True)
     for rid in order:
         pick_seed_for_room(layout, rid)
@@ -398,7 +365,6 @@ def candidate_score(layout: Layout, rid: int, cell: Tuple[int, int]) -> float:
     room = layout.rooms[rid]
     score = 0.0
 
-    # Must touch current room somehow
     own_contacts = 0
     preferred_contacts = 0
     forbidden_contacts = 0
@@ -422,10 +388,8 @@ def candidate_score(layout: Layout, rid: int, cell: Tuple[int, int]) -> float:
     score -= forbidden_contacts * 3.5
     score -= neutral_contacts * 0.2
 
-    # Compactness / aspect control
     current_aspect = layout.room_aspect(rid)
 
-    # Predict aspect if cell added
     old_cells = layout.room_cells[rid]
     xs = [c[0] for c in old_cells] + [x]
     ys = [c[1] for c in old_cells] + [y]
@@ -436,26 +400,20 @@ def candidate_score(layout: Layout, rid: int, cell: Tuple[int, int]) -> float:
     score -= max(0.0, new_aspect - 2.2) * 3.0
     score -= max(0.0, new_aspect - current_aspect) * 0.6
 
-    # Type-specific nudges
     if room.room_type == "garage":
-        # wants front and right-ish
         score += x * 0.4
         score -= y * 0.6
 
     if room.room_type == "bedroom":
-        # prefers back-ish
         score += y * 0.35
 
     if room.room_type == "common":
-        # prefers width / openness
-        score -= max(0.0, new_aspect - 1.8) * 0.6
+        score -= max(0.0, new_aspect - 1.8) * 2.0
 
     if room.room_type == "bathroom":
-        # tries to avoid becoming a noodle
         score -= max(0.0, new_aspect - 1.8) * 2.0
 
     if room.room_type == "pantry":
-        # pantry can be a bit more flexible
         score -= max(0.0, new_aspect - 3.0) * 0.4
 
     score += layout.rng.uniform(-0.15, 0.15)
@@ -517,6 +475,109 @@ def fill_unassigned(layout: Layout):
 
 
 # ------------------------------------------------------------
+# Connectivity + doors
+# ------------------------------------------------------------
+
+def connectivity_score(layout: Layout) -> Tuple[float, int]:
+    """
+    BFS through room adjacency graph starting from the entry-connected room.
+    """
+    entry_x = layout.w // 2
+    entry_room = None
+
+    # Find first room tile along front row, near entry column.
+    # Start at exact entry_x then fan left/right.
+    search_order = [entry_x]
+    for offset in range(1, layout.w):
+        if entry_x - offset >= 0:
+            search_order.append(entry_x - offset)
+        if entry_x + offset < layout.w:
+            search_order.append(entry_x + offset)
+
+    for x in search_order:
+        if layout.grid[x, 0] != -1:
+            entry_room = layout.grid[x, 0]
+            break
+
+    if entry_room is None:
+        # fallback: look upward from entry column
+        x = entry_x
+        for y in range(layout.h):
+            if layout.grid[x, y] != -1:
+                entry_room = layout.grid[x, y]
+                break
+
+    if entry_room is None:
+        return -100.0, 0
+
+    room_graph = {rid: set() for rid in range(len(layout.rooms))}
+
+    for x in range(layout.w):
+        for y in range(layout.h):
+            rid = layout.grid[x, y]
+            if rid == -1:
+                continue
+            for nx, ny in neighbors4(x, y, layout.w, layout.h):
+                orid = layout.grid[nx, ny]
+                if orid != -1 and orid != rid:
+                    room_graph[rid].add(orid)
+
+    visited = set([entry_room])
+    q = deque([entry_room])
+
+    while q:
+        rid = q.popleft()
+        for nbr in room_graph[rid]:
+            if nbr not in visited:
+                visited.add(nbr)
+                q.append(nbr)
+
+    reachable_count = len(visited)
+    total_rooms = len(layout.rooms)
+
+    score = reachable_count * 10.0
+    if reachable_count < total_rooms:
+        score -= (total_rooms - reachable_count) * 25.0
+
+    return score, reachable_count
+
+
+def find_doors(layout: Layout) -> List[Tuple[Tuple[int, int], Tuple[int, int]]]:
+    """
+    Returns unique door candidates between adjacent rooms.
+    Each candidate is represented by two neighboring cells from different rooms.
+    """
+    seen = set()
+    doors = []
+
+    for x in range(layout.w):
+        for y in range(layout.h):
+            rid = layout.grid[x, y]
+            if rid == -1:
+                continue
+
+            for nx, ny in neighbors4(x, y, layout.w, layout.h):
+                orid = layout.grid[nx, ny]
+                if orid == -1 or orid == rid:
+                    continue
+
+                room_a = layout.rooms[rid]
+                room_b = layout.rooms[orid]
+
+                if room_b.room_type in room_a.forbidden_adjacent:
+                    continue
+                if room_a.room_type in room_b.forbidden_adjacent:
+                    continue
+
+                key = tuple(sorted([((x, y), rid), ((nx, ny), orid)], key=lambda v: (v[0][0], v[0][1], v[1])))
+                if key not in seen:
+                    seen.add(key)
+                    doors.append(((x, y), (nx, ny)))
+
+    return doors
+
+
+# ------------------------------------------------------------
 # Scoring
 # ------------------------------------------------------------
 
@@ -535,8 +596,7 @@ def adjacency_report(layout: Layout) -> Dict[str, Set[str]]:
 
 
 def score_layout(layout: Layout) -> Tuple[float, Dict[str, float]]:
-    score = 0.0
-    details = {}
+    details: Dict[str, float] = {}
 
     # 1. Adjacency score
     adj_score = 0.0
@@ -569,7 +629,7 @@ def score_layout(layout: Layout) -> Tuple[float, Dict[str, float]]:
         if room.room_type in ("bathroom", "office") and aspect > 2.6:
             aspect_score -= 8.0
 
-    # 3. Zone fit / semantics
+    # 3. Semantic score
     semantic_score = 0.0
     for rid, room in enumerate(layout.rooms):
         bbox = layout.room_bbox(rid)
@@ -585,13 +645,21 @@ def score_layout(layout: Layout) -> Tuple[float, Dict[str, float]]:
             semantic_score += cx * 0.8 - cy * 0.8
         if room.room_type == "common":
             semantic_score += max(0, 6 - cy) * 1.2
+        if room.room_type == "kitchen":
+            semantic_score += cx * 0.2
 
-    score = adj_score + aspect_score + semantic_score
+    # 4. Connectivity score
+    conn_score, reachable = connectivity_score(layout)
+
+    total_score = adj_score + aspect_score + semantic_score + conn_score
+
     details["adjacency"] = adj_score
     details["aspect"] = aspect_score
     details["semantic"] = semantic_score
-    details["total"] = score
-    return score, details
+    details["connectivity"] = conn_score
+    details["reachable_rooms"] = float(reachable)
+    details["total"] = total_score
+    return total_score, details
 
 
 # ------------------------------------------------------------
@@ -603,7 +671,9 @@ def plot_layout(layout: Layout, title: str):
 
     # Zone outlines
     for zname, z in layout.zones.items():
-        ax.add_patch(Rectangle((z.x0, z.y0), z.width, z.height, fill=False, linestyle="--", linewidth=2))
+        ax.add_patch(
+            Rectangle((z.x0, z.y0), z.width, z.height, fill=False, linestyle="--", linewidth=2)
+        )
         ax.text(
             z.x0 + z.width / 2,
             z.y0 + z.height / 2,
@@ -621,11 +691,20 @@ def plot_layout(layout: Layout, title: str):
             rid = layout.grid[x, y]
             if rid != -1:
                 ax.add_patch(
-                    Rectangle((x, y), 1, 1,
-                              facecolor=room_color(layout.rooms[rid].room_type),
-                              edgecolor="black",
-                              linewidth=0.8)
+                    Rectangle(
+                        (x, y), 1, 1,
+                        facecolor=room_color(layout.rooms[rid].room_type),
+                        edgecolor="black",
+                        linewidth=0.8
+                    )
                 )
+
+    # Door candidates
+    doors = find_doors(layout)
+    for (x1, y1), (x2, y2) in doors:
+        mx = (x1 + x2) / 2 + 0.5
+        my = (y1 + y2) / 2 + 0.5
+        ax.plot(mx, my, "ks", markersize=2.5)
 
     # Labels
     for rid, room in enumerate(layout.rooms):
@@ -646,7 +725,9 @@ def plot_layout(layout: Layout, title: str):
 
     # Entry marker at front center
     entry_x = layout.w / 2 - 0.5
-    ax.add_patch(Rectangle((entry_x, -0.15), 1.0, 0.3, facecolor="white", edgecolor="black", linewidth=2))
+    ax.add_patch(
+        Rectangle((entry_x, -0.15), 1.0, 0.3, facecolor="white", edgecolor="black", linewidth=2)
+    )
     ax.text(layout.w / 2, -0.8, "ENTRY", ha="center", va="center", fontsize=10)
 
     ax.set_xlim(-1, layout.w + 1)
@@ -696,7 +777,10 @@ def print_summary(layout: Layout, score: float, details: Dict[str, float]):
     print(f"House size: {layout.w} x {layout.h} = {layout.w * layout.h}")
     print(f"Score: {score:.2f}")
     for k, v in details.items():
-        print(f"  {k:10s}: {v:.2f}")
+        if k == "reachable_rooms":
+            print(f"  {k:14s}: {int(v)} / {len(layout.rooms)}")
+        else:
+            print(f"  {k:14s}: {v:.2f}")
 
     print("\n=== ROOM LIST ===")
     for rid, room in enumerate(layout.rooms):
@@ -711,13 +795,17 @@ def print_summary(layout: Layout, score: float, details: Dict[str, float]):
     for room_name, neighbors in report.items():
         print(f"{room_name:10s}: {sorted(neighbors)}")
 
+    print("\n=== DOOR CANDIDATES ===")
+    doors = find_doors(layout)
+    print(f"Door candidates found: {len(doors)}")
+
 
 if __name__ == "__main__":
     layout, score, details = generate_best_layout(
-        house_w=18,   # tweak this later
+        house_w=18,
         house_h=12,
         trials=50,
         base_seed=100
     )
     print_summary(layout, score, details)
-    plot_layout(layout, title=f"Round 2: Zone-Aware Grid Layout | score={score:.1f}")
+    plot_layout(layout, title=f"Round 3: Layout + Connectivity + Doors | score={score:.1f}")
