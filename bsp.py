@@ -1,5 +1,6 @@
 import random
 from collections import deque
+import matplotlib.pyplot as plt
 
 MIN_WIDTH = 25
 MAX_WIDTH = 49   # odd only
@@ -81,6 +82,14 @@ def bfs_path(grid, start, goal):
         cur = prev[cur]
     path.reverse()
     return path
+
+
+def find_marker(grid, marker):
+    for y in range(len(grid)):
+        for x in range(len(grid[0])):
+            if grid[y][x] == marker:
+                return (x, y)
+    return None
 
 
 class BSPNode:
@@ -201,7 +210,6 @@ def carve_corridor(grid, a, b):
 
 
 def make_room_in_leaf(leaf, house_width, house_height):
-    # If the leaf touches the outer shell, allow zero margin on that side
     min_left = 0 if leaf.x1 == 1 else 1
     min_right = 0 if leaf.x2 == house_width - 2 else 1
     min_top = 0 if leaf.y1 == 1 else 1
@@ -225,7 +233,6 @@ def make_room_in_leaf(leaf, house_width, house_height):
     y1 = leaf.y1 + top_margin
     y2 = leaf.y2 - bottom_margin
 
-    # tighten if randomness made it too small
     if x2 - x1 + 1 < MIN_ROOM_WIDTH:
         x1 = leaf.x1 + min_left
         x2 = x1 + MIN_ROOM_WIDTH - 1
@@ -437,7 +444,6 @@ def generate_once(debug=False):
             print("Rejected: fewer than 2 exterior rooms")
         return None
 
-    # Prefer Common for F if possible
     common_exterior = [r for r in exterior_rooms if labels[id(r)] == "Common"]
     if common_exterior:
         front_room = random.choice(common_exterior)
@@ -510,6 +516,66 @@ def generate_valid_house(max_attempts=300, debug=False):
     raise RuntimeError("Failed to generate a valid house.")
 
 
+def plot_house(grid, rooms, labels, width, height, path=None, title="BSP House Layout"):
+    fig, ax = plt.subplots(figsize=(10, 8))
+    ax.set_facecolor("white")
+
+    for y in range(height):
+        for x in range(width):
+            cell = grid[y][x]
+            if cell == "#":
+                rect = plt.Rectangle((x, height - y - 1), 1, 1)
+                ax.add_patch(rect)
+            else:
+                rect = plt.Rectangle(
+                    (x, height - y - 1), 1, 1,
+                    fill=False, linewidth=0.4, edgecolor="lightgray"
+                )
+                ax.add_patch(rect)
+
+    if path:
+        xs = [x + 0.5 for x, y in path]
+        ys = [height - y - 0.5 for x, y in path]
+        ax.plot(xs, ys, linewidth=2)
+
+    for room in rooms:
+        label = labels[id(room)]
+        cx, cy = room_center(room)
+        ax.text(
+            cx + 0.5,
+            height - cy - 0.5,
+            label,
+            ha="center",
+            va="center",
+            fontsize=8,
+            fontweight="bold",
+            bbox=dict(boxstyle="round,pad=0.2", fc="white", ec="black", alpha=0.85),
+        )
+
+    for y in range(height):
+        for x in range(width):
+            cell = grid[y][x]
+            if cell in ("F", "B"):
+                ax.text(
+                    x + 0.5,
+                    height - y - 0.5,
+                    cell,
+                    ha="center",
+                    va="center",
+                    fontsize=14,
+                    fontweight="bold",
+                    bbox=dict(boxstyle="circle,pad=0.25", fc="white", ec="black"),
+                )
+
+    ax.set_xlim(0, width)
+    ax.set_ylim(0, height)
+    ax.set_aspect("equal")
+    ax.axis("off")
+    ax.set_title(title)
+    plt.tight_layout()
+    plt.show()
+
+
 if __name__ == "__main__":
     grid, rooms, labels, width, height, attempts = generate_valid_house(debug=True)
 
@@ -520,3 +586,9 @@ if __name__ == "__main__":
     print("\nRooms:")
     for room in rooms:
         print(labels[id(room)], room)
+
+    start = find_marker(grid, "F")
+    goal = find_marker(grid, "B")
+    path = bfs_path(grid, start, goal)
+
+    plot_house(grid, rooms, labels, width, height, path=path, title="BSP House Layout with F→B Path")
