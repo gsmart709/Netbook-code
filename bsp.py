@@ -6,21 +6,12 @@ MAX_WIDTH = 49   # odd only
 MIN_HEIGHT = 19
 MAX_HEIGHT = 37  # odd only
 
-MIN_LEAF_WIDTH = 7
-MIN_LEAF_HEIGHT = 7
+MIN_LEAF_WIDTH = 9
+MIN_LEAF_HEIGHT = 9
 MAX_SPLIT_DEPTH = 4
 
-ROOM_LABELS = [
-    "Kitchen",
-    "Common",
-    "Bedroom",
-    "Bathroom",
-    "Office",
-    "Dining",
-    "Storage",
-    "Garage",
-    "Laundry",
-]
+MIN_ROOM_WIDTH = 5
+MIN_ROOM_HEIGHT = 5
 
 
 def odd_rand(a, b):
@@ -28,14 +19,19 @@ def odd_rand(a, b):
     return random.choice(vals)
 
 
+def make_grid(width, height, fill="#"):
+    return [[fill for _ in range(width)] for _ in range(height)]
+
+
+def print_grid(grid):
+    for row in grid:
+        print("".join(row))
+
+
 def room_center(room):
     cx = (room["x1"] + room["x2"]) // 2
     cy = (room["y1"] + room["y2"]) // 2
     return cx, cy
-
-
-def make_grid(width, height, fill="#"):
-    return [[fill for _ in range(width)] for _ in range(height)]
 
 
 def in_bounds(x, y, width, height):
@@ -96,7 +92,6 @@ class BSPNode:
         self.depth = depth
         self.left = None
         self.right = None
-        self.split_orientation = None
         self.room = None
 
     @property
@@ -144,28 +139,22 @@ def split_node(node):
     if orientation == "V":
         min_split = node.x1 + MIN_LEAF_WIDTH
         max_split = node.x2 - MIN_LEAF_WIDTH
-        candidates = [x for x in range(min_split, max_split + 1)]
-        if not candidates:
+        if min_split > max_split:
             return False
-
-        split_x = random.choice(candidates)
+        split_x = random.randint(min_split, max_split)
 
         node.left = BSPNode(node.x1, node.y1, split_x - 1, node.y2, node.depth + 1)
         node.right = BSPNode(split_x + 1, node.y1, node.x2, node.y2, node.depth + 1)
-        node.split_orientation = "V"
         return True
 
     min_split = node.y1 + MIN_LEAF_HEIGHT
     max_split = node.y2 - MIN_LEAF_HEIGHT
-    candidates = [y for y in range(min_split, max_split + 1)]
-    if not candidates:
+    if min_split > max_split:
         return False
-
-    split_y = random.choice(candidates)
+    split_y = random.randint(min_split, max_split)
 
     node.left = BSPNode(node.x1, node.y1, node.x2, split_y - 1, node.depth + 1)
     node.right = BSPNode(node.x1, split_y + 1, node.x2, node.y2, node.depth + 1)
-    node.split_orientation = "H"
     return True
 
 
@@ -184,153 +173,197 @@ def collect_leaves(node, out):
 
 
 def carve_room(grid, room):
-    for y in range(room["y1"] + 1, room["y2"]):
-        for x in range(room["x1"] + 1, room["x2"]):
+    for y in range(room["y1"], room["y2"] + 1):
+        for x in range(room["x1"], room["x2"] + 1):
             grid[y][x] = " "
 
 
-def make_leaf_rooms(leaves, grid):
+def carve_h_tunnel(grid, x1, x2, y):
+    for x in range(min(x1, x2), max(x1, x2) + 1):
+        grid[y][x] = " "
+
+
+def carve_v_tunnel(grid, y1, y2, x):
+    for y in range(min(y1, y2), max(y1, y2) + 1):
+        grid[y][x] = " "
+
+
+def carve_corridor(grid, a, b):
+    ax, ay = a
+    bx, by = b
+
+    if random.random() < 0.5:
+        carve_h_tunnel(grid, ax, bx, ay)
+        carve_v_tunnel(grid, ay, by, bx)
+    else:
+        carve_v_tunnel(grid, ay, by, ax)
+        carve_h_tunnel(grid, ax, bx, by)
+
+
+def make_room_in_leaf(leaf):
+    max_margin_x = max(1, (leaf.width - MIN_ROOM_WIDTH) // 2)
+    max_margin_y = max(1, (leaf.height - MIN_ROOM_HEIGHT) // 2)
+
+    left_margin = random.randint(1, max_margin_x)
+    right_margin = random.randint(1, max_margin_x)
+    top_margin = random.randint(1, max_margin_y)
+    bottom_margin = random.randint(1, max_margin_y)
+
+    x1 = leaf.x1 + left_margin
+    x2 = leaf.x2 - right_margin
+    y1 = leaf.y1 + top_margin
+    y2 = leaf.y2 - bottom_margin
+
+    # fallback if randomness got too greedy
+    if x2 - x1 + 1 < MIN_ROOM_WIDTH:
+        x1 = leaf.x1 + 1
+        x2 = leaf.x2 - 1
+    if y2 - y1 + 1 < MIN_ROOM_HEIGHT:
+        y1 = leaf.y1 + 1
+        y2 = leaf.y2 - 1
+
+    # absolute fallback
+    if x2 - x1 + 1 < MIN_ROOM_WIDTH or y2 - y1 + 1 < MIN_ROOM_HEIGHT:
+        return None
+
+    return {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
+
+
+def assign_rooms_to_leaves(leaves, grid):
     rooms = []
+    usable_leaves = []
+
     for leaf in leaves:
-        room = {
-            "x1": leaf.x1,
-            "y1": leaf.y1,
-            "x2": leaf.x2,
-            "y2": leaf.y2,
-        }
+        room = make_room_in_leaf(leaf)
+        if room is None:
+            continue
         leaf.room = room
-        rooms.append(room)
         carve_room(grid, room)
-    return rooms
+        rooms.append(room)
+        usable_leaves.append(leaf)
+
+    return rooms, usable_leaves
 
 
-def assign_room_types(leaves):
-    leaves_sorted = sorted(
-        leaves,
-        key=lambda n: n.width * n.height,
-        reverse=True
-    )
+def get_subtree_room(node):
+    if node is None:
+        return None
+    if node.room is not None:
+        return node.room
 
-    labels = {}
+    left_room = get_subtree_room(node.left)
+    right_room = get_subtree_room(node.right)
 
-    required = ["Kitchen", "Common", "Bedroom", "Bathroom"]
-    remaining_pool = [
-        "Dining", "Office", "Bedroom", "Storage",
-        "Laundry", "Garage", "Bedroom", "Common"
-    ]
-
-    chosen = required[:]
-    while len(chosen) < len(leaves_sorted):
-        chosen.append(random.choice(remaining_pool))
-
-    random.shuffle(chosen)
-
-    if len(leaves_sorted) >= 2:
-        big_labels = ["Common", "Kitchen"]
-        random.shuffle(big_labels)
-        labels[id(leaves_sorted[0].room)] = big_labels[0]
-        labels[id(leaves_sorted[1].room)] = big_labels[1]
-
-        skip_common = False
-        skip_kitchen = False
-        chosen_remaining = []
-
-        for lab in chosen:
-            if lab == "Common" and not skip_common:
-                skip_common = True
-                continue
-            if lab == "Kitchen" and not skip_kitchen:
-                skip_kitchen = True
-                continue
-            chosen_remaining.append(lab)
-
-        for i, leaf in enumerate(leaves_sorted[2:]):
-            labels[id(leaf.room)] = chosen_remaining[i]
-    elif len(leaves_sorted) == 1:
-        labels[id(leaves_sorted[0].room)] = "Common"
-
-    return labels
-
-
-def carve_door_between(grid, a, b, orientation):
-    if orientation == "V":
-        wall_x = a.x2 + 1
-        overlap_y1 = max(a.y1 + 1, b.y1 + 1)
-        overlap_y2 = min(a.y2 - 1, b.y2 - 1)
-        candidates = [y for y in range(overlap_y1, overlap_y2 + 1)]
-
-        if candidates:
-            door_y = random.choice(candidates)
-            grid[door_y][wall_x] = "."
-            return True
-
-        # fallback
-        y = max(a.y1 + 1, min((a.y1 + a.y2) // 2, a.y2 - 1))
-        if 0 <= wall_x < len(grid[0]) and 0 <= y < len(grid):
-            grid[y][wall_x] = "."
-            return True
-
-        return False
-
-    wall_y = a.y2 + 1
-    overlap_x1 = max(a.x1 + 1, b.x1 + 1)
-    overlap_x2 = min(a.x2 - 1, b.x2 - 1)
-    candidates = [x for x in range(overlap_x1, overlap_x2 + 1)]
-
-    if candidates:
-        door_x = random.choice(candidates)
-        grid[wall_y][door_x] = "."
-        return True
-
-    # fallback
-    x = max(a.x1 + 1, min((a.x1 + a.x2) // 2, a.x2 - 1))
-    if 0 <= x < len(grid[0]) and 0 <= wall_y < len(grid):
-        grid[wall_y][x] = "."
-        return True
-
-    return False
+    if left_room is not None and right_room is not None:
+        return random.choice([left_room, right_room])
+    return left_room if left_room is not None else right_room
 
 
 def connect_tree(grid, node):
-    if node.is_leaf():
+    if node is None or node.is_leaf():
         return
 
     connect_tree(grid, node.left)
     connect_tree(grid, node.right)
-    carve_door_between(grid, node.left, node.right, node.split_orientation)
+
+    left_room = get_subtree_room(node.left)
+    right_room = get_subtree_room(node.right)
+
+    if left_room is None or right_room is None:
+        return
+
+    a = room_center(left_room)
+    b = room_center(right_room)
+    carve_corridor(grid, a, b)
+
+
+def assign_room_labels(rooms):
+    labels = {}
+
+    rooms_sorted = sorted(
+        rooms,
+        key=lambda r: (r["x2"] - r["x1"] + 1) * (r["y2"] - r["y1"] + 1),
+        reverse=True,
+    )
+
+    required = ["Common", "Kitchen", "Bedroom", "Bathroom"]
+    extras = ["Dining", "Office", "Storage", "Laundry", "Garage", "Bedroom", "Bedroom"]
+
+    chosen = []
+    for r in required:
+        chosen.append(r)
+    while len(chosen) < len(rooms_sorted):
+        chosen.append(random.choice(extras))
+
+    # Force biggest two to be Common and Kitchen
+    if len(rooms_sorted) >= 2:
+        labels[id(rooms_sorted[0])] = "Common"
+        labels[id(rooms_sorted[1])] = "Kitchen"
+
+        used_common = False
+        used_kitchen = False
+        remaining = []
+
+        for lab in chosen:
+            if lab == "Common" and not used_common:
+                used_common = True
+                continue
+            if lab == "Kitchen" and not used_kitchen:
+                used_kitchen = True
+                continue
+            remaining.append(lab)
+
+        for i, room in enumerate(rooms_sorted[2:]):
+            labels[id(room)] = remaining[i]
+    elif len(rooms_sorted) == 1:
+        labels[id(rooms_sorted[0])] = "Common"
+
+    return labels
+
+
+def find_room_by_label(rooms, labels, label):
+    for room in rooms:
+        if labels[id(room)] == label:
+            return room
+    return None
+
+
+def room_touches_exterior(room, width, height):
+    return (
+        room["y1"] == 1
+        or room["y2"] == height - 2
+        or room["x1"] == 1
+        or room["x2"] == width - 2
+    )
 
 
 def get_exterior_candidates(room, width, height):
     candidates = []
 
-    # top wall
     if room["y1"] == 1:
-        for x in range(room["x1"] + 1, room["x2"]):
+        for x in range(room["x1"], room["x2"] + 1):
             candidates.append((x, room["y1"], x, 0))
 
-    # bottom wall
     if room["y2"] == height - 2:
-        for x in range(room["x1"] + 1, room["x2"]):
+        for x in range(room["x1"], room["x2"] + 1):
             candidates.append((x, room["y2"], x, height - 1))
 
-    # left wall
     if room["x1"] == 1:
-        for y in range(room["y1"] + 1, room["y2"]):
+        for y in range(room["y1"], room["y2"] + 1):
             candidates.append((room["x1"], y, 0, y))
 
-    # right wall
     if room["x2"] == width - 2:
-        for y in range(room["y1"] + 1, room["y2"]):
+        for y in range(room["y1"], room["y2"] + 1):
             candidates.append((room["x2"], y, width - 1, y))
 
     return candidates
 
 
-def place_marker_on_exterior(grid, room, marker, width, height, avoid_wall=None):
+def place_marker_on_exterior(grid, room, marker, width, height, avoid_outer=None):
     candidates = get_exterior_candidates(room, width, height)
 
-    if avoid_wall is not None:
-        candidates = [c for c in candidates if c[2:] != avoid_wall]
+    if avoid_outer is not None:
+        candidates = [c for c in candidates if (c[2], c[3]) != avoid_outer]
 
     if not candidates:
         return None
@@ -341,31 +374,23 @@ def place_marker_on_exterior(grid, room, marker, width, height, avoid_wall=None)
     return (outer_x, outer_y), (inside_x, inside_y)
 
 
-def find_room_by_label(rooms, labels, label):
-    for room in rooms:
-        if labels[id(room)] == label:
-            return room
-    return None
-
-
-def score_room_shapes(rooms):
+def score_rooms(rooms, labels):
     score = 0.0
     for room in rooms:
-        w = room["x2"] - room["x1"] - 1
-        h = room["y2"] - room["y1"] - 1
-
-        if w < 3 or h < 3:
-            return -9999
-
+        w = room["x2"] - room["x1"] + 1
+        h = room["y2"] - room["y1"] + 1
         ratio = max(w / h, h / w)
-        score -= (ratio - 1.0) * 5.0
-        score += w * h * 0.05
+        score -= (ratio - 1.0) * 4.0
+        score += w * h * 0.03
 
+        label = labels[id(room)]
+        if label == "Bathroom" and w * h > 80:
+            score -= 5
+        if label == "Storage" and w * h > 90:
+            score -= 5
+
+    score += len(set(labels.values())) * 2.0
     return score
-
-
-def count_unique_labels(labels):
-    return len(set(labels.values()))
 
 
 def generate_once(debug=False):
@@ -382,63 +407,64 @@ def generate_once(debug=False):
 
     if len(leaves) < 4:
         if debug:
-            print("Rejected: fewer than 4 leaves")
+            print("Rejected: too few leaves")
         return None
 
-    rooms = make_leaf_rooms(leaves, grid)
-    connect_tree(grid, root)
-    labels = assign_room_types(leaves)
-
-    kitchen = find_room_by_label(rooms, labels, "Kitchen")
-    common = find_room_by_label(rooms, labels, "Common")
-
-    if kitchen is None or common is None:
+    rooms, usable_leaves = assign_rooms_to_leaves(leaves, grid)
+    if len(rooms) < 4:
         if debug:
-            print("Rejected: missing Kitchen or Common")
+            print("Rejected: too few usable rooms")
         return None
 
-    front = place_marker_on_exterior(grid, common, "F", width, height)
+    connect_tree(grid, root)
+    labels = assign_room_labels(rooms)
+
+    common = find_room_by_label(rooms, labels, "Common")
+    kitchen = find_room_by_label(rooms, labels, "Kitchen")
+
+    if common is None or kitchen is None:
+        if debug:
+            print("Rejected: missing Common or Kitchen")
+        return None
+
+    # Prefer exterior common/kitchen, but allow fallback
+    candidate_front_rooms = [r for r in rooms if labels[id(r)] == "Common" and room_touches_exterior(r, width, height)]
+    if not candidate_front_rooms:
+        candidate_front_rooms = [r for r in rooms if room_touches_exterior(r, width, height)]
+    if not candidate_front_rooms:
+        if debug:
+            print("Rejected: no exterior room for F")
+        return None
+
+    front_room = random.choice(candidate_front_rooms)
+    front = place_marker_on_exterior(grid, front_room, "F", width, height)
     if front is None:
         if debug:
-            print("Rejected: could not place F on Common")
+            print("Rejected: failed placing F")
         return None
 
     front_outer, _ = front
 
-    back = place_marker_on_exterior(
-        grid,
-        kitchen,
-        "B",
-        width,
-        height,
-        avoid_wall=front_outer
-    )
+    candidate_back_rooms = [r for r in rooms if r is not front_room and room_touches_exterior(r, width, height)]
+    if not candidate_back_rooms:
+        if debug:
+            print("Rejected: no exterior room for B")
+        return None
 
-    if back is None:
-        other_rooms = [r for r in rooms if r is not common]
-        random.shuffle(other_rooms)
-
-        placed = None
-        for room in other_rooms:
-            placed = place_marker_on_exterior(
-                grid,
-                room,
-                "B",
-                width,
-                height,
-                avoid_wall=front_outer
-            )
-            if placed is not None:
-                break
-
-        if placed is None:
-            if debug:
-                print("Rejected: could not place B")
-            return None
-
-        back_outer, _ = placed
+    # Prefer kitchen if exterior
+    preferred_back = [r for r in candidate_back_rooms if labels[id(r)] == "Kitchen"]
+    if preferred_back:
+        back_room = random.choice(preferred_back)
     else:
-        back_outer, _ = back
+        back_room = random.choice(candidate_back_rooms)
+
+    back = place_marker_on_exterior(grid, back_room, "B", width, height, avoid_outer=front_outer)
+    if back is None:
+        if debug:
+            print("Rejected: failed placing B")
+        return None
+
+    back_outer, _ = back
 
     path = bfs_path(grid, front_outer, back_outer)
     if path is None:
@@ -446,54 +472,36 @@ def generate_once(debug=False):
             print("Rejected: no F->B path")
         return None
 
-    variety_score = count_unique_labels(labels) * 4.0
-    shape_score = score_room_shapes(rooms)
-    path_score = len(path) * 0.02
-    total_score = variety_score + shape_score + path_score
-
-    return grid, rooms, labels, width, height, total_score
+    score = score_rooms(rooms, labels) + len(path) * 0.02
+    return grid, rooms, labels, width, height, score
 
 
-def generate_valid_house(max_attempts=1000, debug=False):
+def generate_valid_house(max_attempts=300, debug=False):
     best = None
     best_score = -10**9
-    last_non_none = None
 
     for attempt in range(1, max_attempts + 1):
         result = generate_once(debug=debug)
-
         if result is None:
             continue
 
-        last_non_none = result
         grid, rooms, labels, width, height, score = result
 
         if score > best_score:
             best = (grid, rooms, labels, width, height, attempt)
             best_score = score
 
-        if score > 2:
+        if score > 0:
             if debug:
-                print(f"Accepted on attempt {attempt} with score {score:.2f}")
+                print(f"Accepted on attempt {attempt}, score={score:.2f}")
             return grid, rooms, labels, width, height, attempt
 
     if best is not None:
         if debug:
-            print(f"Returning best result after {max_attempts} attempts, score {best_score:.2f}")
+            print(f"Returning best after {max_attempts} attempts, score={best_score:.2f}")
         return best
 
-    if last_non_none is not None:
-        grid, rooms, labels, width, height, _ = last_non_none
-        if debug:
-            print("WARNING: Returning last non-none result")
-        return grid, rooms, labels, width, height, max_attempts
-
     raise RuntimeError("Failed to generate a valid house.")
-
-
-def print_grid(grid):
-    for row in grid:
-        print("".join(row))
 
 
 if __name__ == "__main__":
@@ -501,7 +509,6 @@ if __name__ == "__main__":
 
     print(f"\nHouse size: {width} x {height}")
     print(f"Attempts: {attempts}\n")
-
     print_grid(grid)
 
     print("\nRooms:")
