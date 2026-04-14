@@ -168,11 +168,8 @@ def find_marker(grid, marker):
 # =========================================================
 
 def quantize_rects(raw_rects, width, height):
-    """
-    Convert float treemap rectangles into integer grid rooms inside outer shell.
-    Uses floor/ceil style boundaries, then clamps and filters bad rooms.
-    """
     rooms = []
+
     for i, (x, y, w, h) in enumerate(raw_rects):
         x1 = max(1, int(round(x)))
         y1 = max(1, int(round(y)))
@@ -189,15 +186,13 @@ def quantize_rects(raw_rects, width, height):
             "x2": x2,
             "y2": y2,
         })
+
     return rooms
 
 
 def assign_zones(rooms, width):
     """
-    Ranch-ish:
-    left = public
-    middle = service
-    right = private
+    Loose zoning only. Used mostly for scoring.
     """
     zones = {}
     left_cut = width * 0.42
@@ -220,78 +215,90 @@ def room_area(room):
 
 
 def assign_labels(rooms, zones):
+    """
+    Much looser labeling than before. Less likely to reject everything.
+    """
     labels = {}
-    public_rooms = sorted([r for r in rooms if zones[r["id"]] == "public"], key=room_area, reverse=True)
-    private_rooms = sorted([r for r in rooms if zones[r["id"]] == "private"], key=room_area, reverse=True)
-    service_rooms = sorted([r for r in rooms if zones[r["id"]] == "service"], key=room_area, reverse=True)
 
-    # Public
+    rooms_sorted = sorted(rooms, key=room_area, reverse=True)
+
+    public_rooms = [r for r in rooms_sorted if zones[r["id"]] == "public"]
+    private_rooms = [r for r in rooms_sorted if zones[r["id"]] == "private"]
+    service_rooms = [r for r in rooms_sorted if zones[r["id"]] == "service"]
+
+    # Try to place sensible labels first
     if public_rooms:
         labels[public_rooms[0]["id"]] = "Common"
     if len(public_rooms) > 1:
         labels[public_rooms[1]["id"]] = "Kitchen"
     if len(public_rooms) > 2:
         labels[public_rooms[2]["id"]] = "Dining"
-    for r in public_rooms[3:]:
-        labels[r["id"]] = random.choice(["Dining", "Office", "Common"])
 
-    # Private
     if private_rooms:
         labels[private_rooms[0]["id"]] = "Bedroom"
     if len(private_rooms) > 1:
         labels[private_rooms[1]["id"]] = "Bedroom"
     if len(private_rooms) > 2:
         labels[private_rooms[2]["id"]] = "Bathroom"
-    for r in private_rooms[3:]:
-        labels[r["id"]] = random.choice(["Bathroom", "Office", "Bedroom"])
 
-    # Service
-    service_sequence = ["Laundry", "Storage", "Office"]
-    for i, r in enumerate(service_rooms):
-        if i < len(service_sequence):
-            labels[r["id"]] = service_sequence[i]
+    service_defaults = ["Laundry", "Storage", "Office"]
+    for i, room in enumerate(service_rooms):
+        if room["id"] in labels:
+            continue
+        if i < len(service_defaults):
+            labels[room["id"]] = service_defaults[i]
         else:
-            labels[r["id"]] = random.choice(["Laundry", "Storage", "Office"])
+            labels[room["id"]] = random.choice(["Office", "Storage", "Laundry"])
 
-    # Hard guarantees
-    biggest = sorted(rooms, key=room_area, reverse=True)
-    present = set(labels.values())
+    # Fill unlabeled rooms
+    fallback_pool = [
+        "Office", "Dining", "Storage", "Laundry",
+        "Bedroom", "Bathroom", "Common", "Kitchen"
+    ]
+    for room in rooms_sorted:
+        if room["id"] not in labels:
+            labels[room["id"]] = random.choice(fallback_pool)
 
-    needed = ["Common", "Kitchen", "Bedroom", "Bathroom"]
-    for i, need in enumerate(needed):
-        if need not in present and i < len(biggest):
-            labels[biggest[i]["id"]] = need
-            present.add(need)
+    # Hard guarantees only
+    values = set(labels.values())
+    required = ["Common", "Kitchen", "Bedroom", "Bathroom"]
+    for i, need in enumerate(required):
+        if need not in values and i < len(rooms_sorted):
+            labels[rooms_sorted[i]["id"]] = need
+            values.add(need)
 
     return labels
 
 
 def rooms_share_wall(a, b):
     """
-    Returns adjacency info if they share a wall segment:
-    ('V', wall_x, y1, y2) or ('H', wall_y, x1, x2)
+    Returns:
+      ("V", wall_x, y1, y2) for vertical wall
+      ("H", wall_y, x1, x2) for horizontal wall
     """
-    # vertical shared wall
-    if a["x2"] + 1 == b["x1"] or b["x2"] + 1 == a["x1"]:
-        wall_x = min(a["x2"], b["x2"]) + 1 if a["x2"] < b["x2"] else min(a["x1"], b["x1"])
+    if a["x2"] + 1 == b["x1"]:
         overlap_y1 = max(a["y1"], b["y1"])
         overlap_y2 = min(a["y2"], b["y2"])
         if overlap_y2 >= overlap_y1:
-            # exact wall x between them
-            if a["x2"] + 1 == b["x1"]:
-                return ("V", a["x2"] + 1, overlap_y1, overlap_y2)
-            else:
-                return ("V", b["x2"] + 1, overlap_y1, overlap_y2)
+            return ("V", a["x2"] + 1, overlap_y1, overlap_y2)
 
-    # horizontal shared wall
-    if a["y2"] + 1 == b["y1"] or b["y2"] + 1 == a["y1"]:
+    if b["x2"] + 1 == a["x1"]:
+        overlap_y1 = max(a["y1"], b["y1"])
+        overlap_y2 = min(a["y2"], b["y2"])
+        if overlap_y2 >= overlap_y1:
+            return ("V", b["x2"] + 1, overlap_y1, overlap_y2)
+
+    if a["y2"] + 1 == b["y1"]:
         overlap_x1 = max(a["x1"], b["x1"])
         overlap_x2 = min(a["x2"], b["x2"])
         if overlap_x2 >= overlap_x1:
-            if a["y2"] + 1 == b["y1"]:
-                return ("H", a["y2"] + 1, overlap_x1, overlap_x2)
-            else:
-                return ("H", b["y2"] + 1, overlap_x1, overlap_x2)
+            return ("H", a["y2"] + 1, overlap_x1, overlap_x2)
+
+    if b["y2"] + 1 == a["y1"]:
+        overlap_x1 = max(a["x1"], b["x1"])
+        overlap_x2 = min(a["x2"], b["x2"])
+        if overlap_x2 >= overlap_x1:
+            return ("H", b["y2"] + 1, overlap_x1, overlap_x2)
 
     return None
 
@@ -310,6 +317,7 @@ def build_adjacency(rooms):
                 adj[b].append(a)
                 shared[(a, b)] = info
                 shared[(b, a)] = info
+
     return adj, shared
 
 
@@ -326,20 +334,21 @@ def carve_all_rooms(grid, rooms):
 
 def choose_door_point(shared_info):
     kind = shared_info[0]
+
     if kind == "V":
         _, wall_x, y1, y2 = shared_info
         return (wall_x, random.randint(y1, y2))
-    else:
-        _, wall_y, x1, x2 = shared_info
-        return (random.randint(x1, x2), wall_y)
+
+    _, wall_y, x1, x2 = shared_info
+    return (random.randint(x1, x2), wall_y)
 
 
 def make_graph_connected(room_ids, adj):
     """
-    Build a spanning tree over the adjacency graph so all rooms connect.
+    Build a spanning tree over adjacency graph.
     """
     if not room_ids:
-        return []
+        return None
 
     start = room_ids[0]
     visited = {start}
@@ -354,20 +363,19 @@ def make_graph_connected(room_ids, adj):
             continue
         visited.add(b)
         edges.append((a, b))
+
         nbrs = [(b, nxt) for nxt in adj[b] if nxt not in visited]
         random.shuffle(nbrs)
         frontier.extend(nbrs)
 
-    # if graph somehow disconnected, connect components greedily where possible
-    unvisited = [rid for rid in room_ids if rid not in visited]
-    if unvisited:
+    if len(visited) != len(room_ids):
         return None
 
     return edges
 
 
 def add_extra_doors(tree_edges, adj, extra_ratio=0.25):
-    tree_set = set(tuple(sorted(e)) for e in tree_edges)
+    tree_set = {tuple(sorted(e)) for e in tree_edges}
     all_edges = set()
 
     for a, nbrs in adj.items():
@@ -384,13 +392,20 @@ def add_extra_doors(tree_edges, adj, extra_ratio=0.25):
 
 def place_interior_doors(grid, edges, shared_lookup):
     for a, b in edges:
-        info = shared_lookup[(a, b)]
+        info = shared_lookup.get((a, b))
+        if info is None:
+            continue
         x, y = choose_door_point(info)
         grid[y][x] = GRID_DOOR
 
 
 def touches_exterior(room, width, height):
-    return room["x1"] == 1 or room["x2"] == width - 2 or room["y1"] == 1 or room["y2"] == height - 2
+    return (
+        room["x1"] == 1
+        or room["x2"] == width - 2
+        or room["y1"] == 1
+        or room["y2"] == height - 2
+    )
 
 
 def get_exterior_candidates(room, width, height):
@@ -414,8 +429,10 @@ def get_exterior_candidates(room, width, height):
 
 def place_exterior_marker(grid, room, marker, width, height, avoid_outer=None):
     candidates = get_exterior_candidates(room, width, height)
+
     if avoid_outer is not None:
         candidates = [c for c in candidates if (c[2], c[3]) != avoid_outer]
+
     if not candidates:
         return None
 
@@ -426,47 +443,94 @@ def place_exterior_marker(grid, room, marker, width, height, avoid_outer=None):
 
 
 def validate_house(rooms, labels, zones, adj):
+    """
+    Soft validation. Only reject layouts that are truly busted.
+    """
     by_label = defaultdict(list)
     for room in rooms:
         by_label[labels[room["id"]]].append(room)
 
-    if not by_label["Common"] or not by_label["Kitchen"] or not by_label["Bedroom"] or not by_label["Bathroom"]:
-        return False
+    required = ["Common", "Kitchen", "Bedroom", "Bathroom"]
+    for label in required:
+        if not by_label[label]:
+            return False
 
-    common = by_label["Common"][0]
     kitchen = by_label["Kitchen"][0]
-    common_id = common["id"]
-    kitchen_id = kitchen["id"]
-
-    # kitchen should touch common or dining
-    good_kitchen_neighbor = False
-    for nbr in adj[kitchen_id]:
-        nbr_label = labels[nbr]
-        if nbr_label in ("Common", "Dining", "Laundry"):
-            good_kitchen_neighbor = True
+    kitchen_ok = False
+    for nbr in adj[kitchen["id"]]:
+        if labels[nbr] in ("Common", "Dining", "Laundry", "Office"):
+            kitchen_ok = True
             break
-    if not good_kitchen_neighbor:
-        return False
 
-    # bathroom should not be public
-    bath = by_label["Bathroom"][0]
-    if zones[bath["id"]] == "public":
-        return False
+    bedroom_ok = any(zones[r["id"]] == "private" for r in by_label["Bedroom"])
 
-    # at least one bedroom should be private
-    if not any(zones[r["id"]] == "private" for r in by_label["Bedroom"]):
-        return False
-
-    # common should be public if possible
-    if zones[common_id] != "public":
+    # only truly hard fail if both are garbage
+    if not kitchen_ok and not bedroom_ok:
         return False
 
     return True
 
 
-def generate_treemap_house(width=HOUSE_WIDTH, height=HOUSE_HEIGHT, max_attempts=200):
-    room_names = ["Common", "Kitchen", "Dining", "Bedroom", "Bedroom2", "Bathroom", "Office", "Laundry", "Storage"]
+def score_layout(rooms, labels, zones, adj, path_len):
+    score = 0.0
+
+    for room in rooms:
+        area = room_area(room)
+        w = room["x2"] - room["x1"] + 1
+        h = room["y2"] - room["y1"] + 1
+        ratio = max(w / h, h / w)
+
+        score += area * 0.03
+        score -= (ratio - 1.0) * 3.0
+
+        label = labels[room["id"]]
+        zone = zones[room["id"]]
+
+        if label == "Common":
+            score += 3
+        if label == "Kitchen":
+            score += 2
+        if label == "Bedroom":
+            score += 1.5
+
+        if label in ("Common", "Kitchen", "Dining") and zone == "public":
+            score += 1.5
+        if label in ("Bedroom", "Bathroom") and zone == "private":
+            score += 1.5
+        if label in ("Laundry", "Storage", "Office") and zone == "service":
+            score += 1.0
+
+        if label == "Bathroom" and area > 80:
+            score -= 4
+        if label == "Storage" and area > 90:
+            score -= 4
+
+    # reward useful kitchen adjacency
+    kitchen_ids = [rid for rid, lab in labels.items() if lab == "Kitchen"]
+    if kitchen_ids:
+        k = kitchen_ids[0]
+        useful = 0
+        for nbr in adj[k]:
+            if labels[nbr] in ("Common", "Dining", "Laundry"):
+                useful += 1
+        score += useful * 2.0
+
+    score += len(set(labels.values())) * 0.8
+    score += path_len * 0.03
+
+    return score
+
+
+def generate_treemap_house(width=HOUSE_WIDTH, height=HOUSE_HEIGHT, max_attempts=600, debug=False):
+    room_names = [
+        "Common", "Kitchen", "Dining",
+        "Bedroom", "Bedroom2", "Bathroom",
+        "Office", "Laundry", "Storage"
+    ]
     sizes = [ROOM_AREA_WEIGHTS[name] for name in room_names]
+
+    best_result = None
+    best_score = float("-inf")
 
     for attempt in range(1, max_attempts + 1):
         norm = normalize_sizes(sizes, width - 2, height - 2)
@@ -474,6 +538,8 @@ def generate_treemap_house(width=HOUSE_WIDTH, height=HOUSE_HEIGHT, max_attempts=
 
         rooms = quantize_rects(raw_rects, width, height)
         if len(rooms) < 6:
+            if debug:
+                print("Rejected: too few quantized rooms")
             continue
 
         zones = assign_zones(rooms, width)
@@ -483,9 +549,13 @@ def generate_treemap_house(width=HOUSE_WIDTH, height=HOUSE_HEIGHT, max_attempts=
         room_ids = [r["id"] for r in rooms]
         tree_edges = make_graph_connected(room_ids, adj)
         if tree_edges is None:
+            if debug:
+                print("Rejected: adjacency graph disconnected")
             continue
 
         if not validate_house(rooms, labels, zones, adj):
+            if debug:
+                print("Rejected: soft validation failed")
             continue
 
         grid = make_grid(width, height, GRID_WALL)
@@ -496,6 +566,8 @@ def generate_treemap_house(width=HOUSE_WIDTH, height=HOUSE_HEIGHT, max_attempts=
 
         exterior_rooms = [r for r in rooms if touches_exterior(r, width, height)]
         if len(exterior_rooms) < 2:
+            if debug:
+                print("Rejected: fewer than 2 exterior rooms")
             continue
 
         common_exterior = [r for r in exterior_rooms if labels[r["id"]] == "Common"]
@@ -503,11 +575,16 @@ def generate_treemap_house(width=HOUSE_WIDTH, height=HOUSE_HEIGHT, max_attempts=
 
         front = place_exterior_marker(grid, front_room, GRID_FRONT, width, height)
         if front is None:
+            if debug:
+                print("Rejected: failed placing F")
             continue
+
         front_outer, _ = front
 
         back_choices = [r for r in exterior_rooms if r["id"] != front_room["id"]]
         if not back_choices:
+            if debug:
+                print("Rejected: no back choices")
             continue
 
         kitchen_exterior = [r for r in back_choices if labels[r["id"]] == "Kitchen"]
@@ -516,13 +593,31 @@ def generate_treemap_house(width=HOUSE_WIDTH, height=HOUSE_HEIGHT, max_attempts=
 
         back = place_exterior_marker(grid, back_room, GRID_BACK, width, height, avoid_outer=front_outer)
         if back is None:
+            if debug:
+                print("Rejected: failed placing B")
             continue
 
         path = bfs_path(grid, find_marker(grid, GRID_FRONT), find_marker(grid, GRID_BACK))
         if path is None:
+            if debug:
+                print("Rejected: no F->B path")
             continue
 
-        return grid, rooms, labels, zones, width, height, attempt, path
+        score = score_layout(rooms, labels, zones, adj, len(path))
+
+        if score > best_score:
+            best_score = score
+            best_result = (grid, rooms, labels, zones, width, height, attempt, path)
+
+        if score > 8:
+            if debug:
+                print(f"Accepted on attempt {attempt}, score={score:.2f}")
+            return grid, rooms, labels, zones, width, height, attempt, path
+
+    if best_result is not None:
+        if debug:
+            print(f"Returning best result after {max_attempts} attempts, score={best_score:.2f}")
+        return best_result
 
     raise RuntimeError("Failed to generate a treemap house.")
 
@@ -598,7 +693,7 @@ def plot_house(grid, rooms, labels, width, height, path=None, title="Treemap Hou
 # =========================================================
 
 if __name__ == "__main__":
-    grid, rooms, labels, zones, width, height, attempts, path = generate_treemap_house()
+    grid, rooms, labels, zones, width, height, attempts, path = generate_treemap_house(debug=True)
 
     print(f"Generated in {attempts} attempt(s)")
     print()
