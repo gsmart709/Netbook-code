@@ -354,29 +354,42 @@ def build_house_layout(width, height):
         elif room["y1"] > common["y2"]:
             carve_corridor_L(grid, cx, cy, cx, common["y2"])
 
-    # Front door
+    labels = assign_final_labels(rooms, width, height)
+    valid, reason = validate_room_sizes(rooms, labels)
+    if not valid:
+        return None, reason
+
+    # Front door: ONLY Porch or a bottom room labeled Common, otherwise actual Common
     if porch:
         porch_cx, porch_cy = room_center(porch)
         carve_corridor_L(grid, porch_cx, porch_cy, common_cx, common["y2"])
         carve_cell(grid, porch_cx, height - 1, "F")
         end = (porch_cx, height - 2)
     else:
-        fx_candidates = [common_cx, common_cx - 2, common_cx + 2]
-        fx_candidates = [x for x in fx_candidates if common["x1"] <= x <= common["x2"] and x != kitchen_cx]
-        if not fx_candidates:
-            fx_candidates = [x for x in range(common["x1"], common["x2"] + 1) if x != kitchen_cx]
-        fx = random.choice(fx_candidates)
+        front_target_room = None
+
+        # Prefer a bottom room that got labeled Common
+        for room in rooms:
+            if room is common:
+                continue
+            if room["y2"] == height - 2 and labels[id(room)] == "Common":
+                front_target_room = room
+                break
+
+        if front_target_room is None:
+            front_target_room = common
+
+        fx, fy = room_center(front_target_room)
         carve_cell(grid, fx, height - 1, "F")
         end = (fx, height - 2)
+
+        # Ensure front target connects to actual common if it isn't the actual common
+        if front_target_room is not common:
+            carve_corridor_L(grid, fx, fy, common_cx, common["y2"])
 
     # Back door
     carve_cell(grid, kitchen_cx, 0, "B")
     start = (kitchen_cx, 1)
-
-    labels = assign_final_labels(rooms, width, height)
-    valid, reason = validate_room_sizes(rooms, labels)
-    if not valid:
-        return None, reason
 
     return {
         "grid": grid,
