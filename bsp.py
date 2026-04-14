@@ -200,49 +200,64 @@ def carve_corridor(grid, a, b):
         carve_h_tunnel(grid, ax, bx, by)
 
 
-def make_room_in_leaf(leaf):
-    max_margin_x = max(1, (leaf.width - MIN_ROOM_WIDTH) // 2)
-    max_margin_y = max(1, (leaf.height - MIN_ROOM_HEIGHT) // 2)
+def make_room_in_leaf(leaf, house_width, house_height):
+    # If the leaf touches the outer shell, allow zero margin on that side
+    min_left = 0 if leaf.x1 == 1 else 1
+    min_right = 0 if leaf.x2 == house_width - 2 else 1
+    min_top = 0 if leaf.y1 == 1 else 1
+    min_bottom = 0 if leaf.y2 == house_height - 2 else 1
 
-    left_margin = random.randint(1, max_margin_x)
-    right_margin = random.randint(1, max_margin_x)
-    top_margin = random.randint(1, max_margin_y)
-    bottom_margin = random.randint(1, max_margin_y)
+    max_left = max(min_left, leaf.width - MIN_ROOM_WIDTH - min_right)
+    max_right = max(min_right, leaf.width - MIN_ROOM_WIDTH - min_left)
+    max_top = max(min_top, leaf.height - MIN_ROOM_HEIGHT - min_bottom)
+    max_bottom = max(min_bottom, leaf.height - MIN_ROOM_HEIGHT - min_top)
+
+    if max_left < min_left or max_right < min_right or max_top < min_top or max_bottom < min_bottom:
+        return None
+
+    left_margin = random.randint(min_left, max_left)
+    right_margin = random.randint(min_right, max_right)
+    top_margin = random.randint(min_top, max_top)
+    bottom_margin = random.randint(min_bottom, max_bottom)
 
     x1 = leaf.x1 + left_margin
     x2 = leaf.x2 - right_margin
     y1 = leaf.y1 + top_margin
     y2 = leaf.y2 - bottom_margin
 
-    # fallback if randomness got too greedy
+    # tighten if randomness made it too small
     if x2 - x1 + 1 < MIN_ROOM_WIDTH:
-        x1 = leaf.x1 + 1
-        x2 = leaf.x2 - 1
-    if y2 - y1 + 1 < MIN_ROOM_HEIGHT:
-        y1 = leaf.y1 + 1
-        y2 = leaf.y2 - 1
+        x1 = leaf.x1 + min_left
+        x2 = x1 + MIN_ROOM_WIDTH - 1
+        if x2 > leaf.x2 - min_right:
+            x2 = leaf.x2 - min_right
+            x1 = x2 - MIN_ROOM_WIDTH + 1
 
-    # absolute fallback
+    if y2 - y1 + 1 < MIN_ROOM_HEIGHT:
+        y1 = leaf.y1 + min_top
+        y2 = y1 + MIN_ROOM_HEIGHT - 1
+        if y2 > leaf.y2 - min_bottom:
+            y2 = leaf.y2 - min_bottom
+            y1 = y2 - MIN_ROOM_HEIGHT + 1
+
     if x2 - x1 + 1 < MIN_ROOM_WIDTH or y2 - y1 + 1 < MIN_ROOM_HEIGHT:
         return None
 
     return {"x1": x1, "y1": y1, "x2": x2, "y2": y2}
 
 
-def assign_rooms_to_leaves(leaves, grid):
+def assign_rooms_to_leaves(leaves, grid, house_width, house_height):
     rooms = []
-    usable_leaves = []
 
     for leaf in leaves:
-        room = make_room_in_leaf(leaf)
+        room = make_room_in_leaf(leaf, house_width, house_height)
         if room is None:
             continue
         leaf.room = room
         carve_room(grid, room)
         rooms.append(room)
-        usable_leaves.append(leaf)
 
-    return rooms, usable_leaves
+    return rooms
 
 
 def get_subtree_room(node):
@@ -289,13 +304,10 @@ def assign_room_labels(rooms):
     required = ["Common", "Kitchen", "Bedroom", "Bathroom"]
     extras = ["Dining", "Office", "Storage", "Laundry", "Garage", "Bedroom", "Bedroom"]
 
-    chosen = []
-    for r in required:
-        chosen.append(r)
+    chosen = required[:]
     while len(chosen) < len(rooms_sorted):
         chosen.append(random.choice(extras))
 
-    # Force biggest two to be Common and Kitchen
     if len(rooms_sorted) >= 2:
         labels[id(rooms_sorted[0])] = "Common"
         labels[id(rooms_sorted[1])] = "Kitchen"
@@ -330,10 +342,10 @@ def find_room_by_label(rooms, labels, label):
 
 def room_touches_exterior(room, width, height):
     return (
-        room["y1"] == 1
-        or room["y2"] == height - 2
-        or room["x1"] == 1
+        room["x1"] == 1
         or room["x2"] == width - 2
+        or room["y1"] == 1
+        or room["y2"] == height - 2
     )
 
 
@@ -410,7 +422,7 @@ def generate_once(debug=False):
             print("Rejected: too few leaves")
         return None
 
-    rooms, usable_leaves = assign_rooms_to_leaves(leaves, grid)
+    rooms = assign_rooms_to_leaves(leaves, grid, width, height)
     if len(rooms) < 4:
         if debug:
             print("Rejected: too few usable rooms")
@@ -419,24 +431,19 @@ def generate_once(debug=False):
     connect_tree(grid, root)
     labels = assign_room_labels(rooms)
 
-    common = find_room_by_label(rooms, labels, "Common")
-    kitchen = find_room_by_label(rooms, labels, "Kitchen")
-
-    if common is None or kitchen is None:
+    exterior_rooms = [r for r in rooms if room_touches_exterior(r, width, height)]
+    if len(exterior_rooms) < 2:
         if debug:
-            print("Rejected: missing Common or Kitchen")
+            print("Rejected: fewer than 2 exterior rooms")
         return None
 
-    # Prefer exterior common/kitchen, but allow fallback
-    candidate_front_rooms = [r for r in rooms if labels[id(r)] == "Common" and room_touches_exterior(r, width, height)]
-    if not candidate_front_rooms:
-        candidate_front_rooms = [r for r in rooms if room_touches_exterior(r, width, height)]
-    if not candidate_front_rooms:
-        if debug:
-            print("Rejected: no exterior room for F")
-        return None
+    # Prefer Common for F if possible
+    common_exterior = [r for r in exterior_rooms if labels[id(r)] == "Common"]
+    if common_exterior:
+        front_room = random.choice(common_exterior)
+    else:
+        front_room = random.choice(exterior_rooms)
 
-    front_room = random.choice(candidate_front_rooms)
     front = place_marker_on_exterior(grid, front_room, "F", width, height)
     if front is None:
         if debug:
@@ -445,18 +452,17 @@ def generate_once(debug=False):
 
     front_outer, _ = front
 
-    candidate_back_rooms = [r for r in rooms if r is not front_room and room_touches_exterior(r, width, height)]
-    if not candidate_back_rooms:
+    back_candidates = [r for r in exterior_rooms if r is not front_room]
+    if not back_candidates:
         if debug:
-            print("Rejected: no exterior room for B")
+            print("Rejected: no exterior room left for B")
         return None
 
-    # Prefer kitchen if exterior
-    preferred_back = [r for r in candidate_back_rooms if labels[id(r)] == "Kitchen"]
-    if preferred_back:
-        back_room = random.choice(preferred_back)
+    kitchen_exterior = [r for r in back_candidates if labels[id(r)] == "Kitchen"]
+    if kitchen_exterior:
+        back_room = random.choice(kitchen_exterior)
     else:
-        back_room = random.choice(candidate_back_rooms)
+        back_room = random.choice(back_candidates)
 
     back = place_marker_on_exterior(grid, back_room, "B", width, height, avoid_outer=front_outer)
     if back is None:
