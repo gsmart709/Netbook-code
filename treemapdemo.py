@@ -15,8 +15,8 @@ GRID_DOOR = "."
 GRID_FRONT = "F"
 GRID_BACK = "B"
 
-MIN_ROOM_W = 4
-MIN_ROOM_H = 4
+MIN_ROOM_W = 3
+MIN_ROOM_H = 3
 
 ROOM_AREA_WEIGHTS = {
     "Common": 42,
@@ -171,12 +171,21 @@ def quantize_rects(raw_rects, width, height):
     rooms = []
 
     for i, (x, y, w, h) in enumerate(raw_rects):
-        x1 = max(1, int(round(x)))
-        y1 = max(1, int(round(y)))
-        x2 = min(width - 2, int(round(x + w)) - 1)
-        y2 = min(height - 2, int(round(y + h)) - 1)
+        x1 = max(1, int(x))
+        y1 = max(1, int(y))
+        x2 = min(width - 2, int(x + w))
+        y2 = min(height - 2, int(y + h))
 
-        if x2 - x1 + 1 < MIN_ROOM_W or y2 - y1 + 1 < MIN_ROOM_H:
+        # Force a minimum size instead of skipping immediately
+        if x2 - x1 + 1 < MIN_ROOM_W:
+            x2 = x1 + MIN_ROOM_W - 1
+        if y2 - y1 + 1 < MIN_ROOM_H:
+            y2 = y1 + MIN_ROOM_H - 1
+
+        x2 = min(x2, width - 2)
+        y2 = min(y2, height - 2)
+
+        if x2 <= x1 or y2 <= y1:
             continue
 
         rooms.append({
@@ -191,9 +200,6 @@ def quantize_rects(raw_rects, width, height):
 
 
 def assign_zones(rooms, width):
-    """
-    Loose zoning only. Used mostly for scoring.
-    """
     zones = {}
     left_cut = width * 0.42
     right_cut = width * 0.70
@@ -215,18 +221,13 @@ def room_area(room):
 
 
 def assign_labels(rooms, zones):
-    """
-    Much looser labeling than before. Less likely to reject everything.
-    """
     labels = {}
-
     rooms_sorted = sorted(rooms, key=room_area, reverse=True)
 
     public_rooms = [r for r in rooms_sorted if zones[r["id"]] == "public"]
     private_rooms = [r for r in rooms_sorted if zones[r["id"]] == "private"]
     service_rooms = [r for r in rooms_sorted if zones[r["id"]] == "service"]
 
-    # Try to place sensible labels first
     if public_rooms:
         labels[public_rooms[0]["id"]] = "Common"
     if len(public_rooms) > 1:
@@ -250,7 +251,6 @@ def assign_labels(rooms, zones):
         else:
             labels[room["id"]] = random.choice(["Office", "Storage", "Laundry"])
 
-    # Fill unlabeled rooms
     fallback_pool = [
         "Office", "Dining", "Storage", "Laundry",
         "Bedroom", "Bathroom", "Common", "Kitchen"
@@ -259,7 +259,6 @@ def assign_labels(rooms, zones):
         if room["id"] not in labels:
             labels[room["id"]] = random.choice(fallback_pool)
 
-    # Hard guarantees only
     values = set(labels.values())
     required = ["Common", "Kitchen", "Bedroom", "Bathroom"]
     for i, need in enumerate(required):
@@ -271,11 +270,6 @@ def assign_labels(rooms, zones):
 
 
 def rooms_share_wall(a, b):
-    """
-    Returns:
-      ("V", wall_x, y1, y2) for vertical wall
-      ("H", wall_y, x1, x2) for horizontal wall
-    """
     if a["x2"] + 1 == b["x1"]:
         overlap_y1 = max(a["y1"], b["y1"])
         overlap_y2 = min(a["y2"], b["y2"])
@@ -344,9 +338,6 @@ def choose_door_point(shared_info):
 
 
 def make_graph_connected(room_ids, adj):
-    """
-    Build a spanning tree over adjacency graph.
-    """
     if not room_ids:
         return None
 
@@ -443,9 +434,6 @@ def place_exterior_marker(grid, room, marker, width, height, avoid_outer=None):
 
 
 def validate_house(rooms, labels, zones, adj):
-    """
-    Soft validation. Only reject layouts that are truly busted.
-    """
     by_label = defaultdict(list)
     for room in rooms:
         by_label[labels[room["id"]]].append(room)
@@ -464,7 +452,6 @@ def validate_house(rooms, labels, zones, adj):
 
     bedroom_ok = any(zones[r["id"]] == "private" for r in by_label["Bedroom"])
 
-    # only truly hard fail if both are garbage
     if not kitchen_ok and not bedroom_ok:
         return False
 
@@ -505,7 +492,6 @@ def score_layout(rooms, labels, zones, adj, path_len):
         if label == "Storage" and area > 90:
             score -= 4
 
-    # reward useful kitchen adjacency
     kitchen_ids = [rid for rid, lab in labels.items() if lab == "Kitchen"]
     if kitchen_ids:
         k = kitchen_ids[0]
@@ -533,11 +519,13 @@ def generate_treemap_house(width=HOUSE_WIDTH, height=HOUSE_HEIGHT, max_attempts=
     best_score = float("-inf")
 
     for attempt in range(1, max_attempts + 1):
-        norm = normalize_sizes(sizes, width - 2, height - 2)
+        # Shuffle weights slightly so every try is not identical
+        perturbed = [s * random.uniform(0.85, 1.20) for s in sizes]
+        norm = normalize_sizes(perturbed, width - 2, height - 2)
         raw_rects = squarify(norm, 1, 1, width - 2, height - 2)
 
         rooms = quantize_rects(raw_rects, width, height)
-        if len(rooms) < 6:
+        if len(rooms) < 4:
             if debug:
                 print("Rejected: too few quantized rooms")
             continue
